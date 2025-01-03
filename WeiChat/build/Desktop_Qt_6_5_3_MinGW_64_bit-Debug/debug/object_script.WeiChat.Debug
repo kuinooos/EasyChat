@@ -1,0 +1,17 @@
+debug/chat_dialog.o
+debug/chatuserlist.o
+debug/chatuserwid.o
+debug/customizeedit.o
+debug/global.o
+debug/listitembase.o
+debug/loadingdlg.o
+debug/main.o
+debug/mainwindow.o
+debug/qrc_rs.o
+debug/moc_chat_dialog.o
+debug/moc_chatuserlist.o
+debug/moc_chatuserwid.o
+debug/moc_customizeedit.o
+debug/moc_listitembase.o
+debug/moc_loadingdlg.o
+debug/moc_mainwindow.o

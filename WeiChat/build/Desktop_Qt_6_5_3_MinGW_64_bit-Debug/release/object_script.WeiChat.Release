@@ -1,0 +1,17 @@
+release/chat_dialog.o
+release/chatuserlist.o
+release/chatuserwid.o
+release/customizeedit.o
+release/global.o
+release/listitembase.o
+release/loadingdlg.o
+release/main.o
+release/mainwindow.o
+release/qrc_rs.o
+release/moc_chat_dialog.o
+release/moc_chatuserlist.o
+release/moc_chatuserwid.o
+release/moc_customizeedit.o
+release/moc_listitembase.o
+release/moc_loadingdlg.o
+release/moc_mainwindow.o
