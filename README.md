@@ -36,6 +36,21 @@
 
 ---
 
+## **项目演示**
+- *注册
+![image](https://github.com/user-attachments/assets/2e8cd8b7-f316-4eed-92c5-87dc2a0a6e11)
+
+- *登录
+![image](https://github.com/user-attachments/assets/d8aef538-0b56-42fd-940c-238252562f89)
+- 这个时候可以在后台数据库的client表看到新增的用户信息
+![image](https://github.com/user-attachments/assets/e01af893-9602-4be5-8dc5-f41334282012)
+
+- *添加好友
+![Uploading image.png…]()
+
+
+---
+
 ## **未来计划**
 1. **完善聊天功能**：增加消息撤回、表情包和贴图等功能。  
 2. **安全性增强**：加入加密传输、身份验证等机制。  
