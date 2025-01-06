@@ -1,4 +1,4 @@
-# EasyChat
+![image](https://github.com/user-attachments/assets/a9c09954-0edb-450a-820b-2c85ff134c24)# EasyChat
 
 ## **易言——项目描述**
 这是我作为一名大二学生，根据自己的理解和兴趣纯手工编写的一个聊天程序。通过这个项目，我学习并实践了客户端与服务器端的通信、并发处理、数据库操作等技术，提升了自己在软件开发方面的能力。
@@ -37,17 +37,30 @@
 ---
 
 ## **项目演示**
-- *注册
+- 注册
 ![image](https://github.com/user-attachments/assets/2e8cd8b7-f316-4eed-92c5-87dc2a0a6e11)
 
-- *登录
+- 登录
 ![image](https://github.com/user-attachments/assets/d8aef538-0b56-42fd-940c-238252562f89)
 - 这个时候可以在后台数据库的client表看到新增的用户信息
 ![image](https://github.com/user-attachments/assets/e01af893-9602-4be5-8dc5-f41334282012)
 
-- *添加好友
-![Uploading image.png…]()
+- 添加好友
+![image](https://github.com/user-attachments/assets/6ed15d65-c39d-4635-8987-9e85045cf61d)
 
+-聊天通信
+![image](https://github.com/user-attachments/assets/cd79e583-1d52-420e-bed1-ac445913616a)
+
+-Emoji调用
+![image](https://github.com/user-attachments/assets/02d7e631-2802-49fe-aa10-367b8e224ed9)
+
+-文件传输
+此时聊天栏会显示发送的文件名，发送的文件对方可以在指定文件夹中看到
+![image](https://github.com/user-attachments/assets/6fa70e3c-2a6b-40f8-8cd7-053c54e3e27c)
+
+-视频通信
+由于是在本地电脑测试，所有这里目前只能调用一个摄像头，也就是只能看到一方的画面
+![image](https://github.com/user-attachments/assets/989ef8d6-286a-4ac6-84b3-84c9cef41595)
 
 ---
 
