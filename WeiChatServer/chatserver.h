@@ -5,10 +5,12 @@
 #include<QHostAddress>
 #include<QtNetwork>
 #include"chattask.h"
+#include"workerthread.h"
 #include<QPointer>
 #include<QReadWriteLock>
 #include<QFile>
 #include<QThread>
+#include<QVector>
 
 class ChatServer : public QTcpServer
 {
@@ -17,6 +19,16 @@ class ChatServer : public QTcpServer
 public:
     explicit ChatServer(QObject *parent=nullptr) : QTcpServer(parent){
         clientTaskMap = new QMap<QString, QPointer<ChatTask>>();
+
+        // 创建固定数量的 Worker 线程（= CPU 逻辑核心数）
+        int workerCount = QThread::idealThreadCount();
+        if (workerCount <= 0) workerCount = 4; // 兜底
+        for (int i = 0; i < workerCount; ++i) {
+            auto *w = new WorkerThread(this);
+            w->start();
+            m_workers.append(w);
+        }
+        qDebug() << "Worker threads started:" << workerCount;
 
         if(this->listen(QHostAddress::AnyIPv6,7777)){
             qDebug() << "IPv6 chat server started on port 7777" << serverAddress().toString();
@@ -28,33 +40,31 @@ public:
     };
 
     ~ChatServer() override {
-        /*找出当前对象（chatserver）的所有子线程并请求它们退出
-        当 ChatServer 被销毁时，Qt 的对象树会自动删除所有子对象（包括 QThread）
-        如果线程此时还在运行（比如正在执行某个任务）
-        强行销毁线程对象会导致未定义行为，通常就是程序直接崩溃。*/
-        const auto threads = findChildren<QThread*>();
-        for (QThread *thread : threads) {
-            thread->quit();
-            thread->wait(3000);
+        // 通知所有 worker 线程退出事件循环并等待
+        for (WorkerThread *w : m_workers) {
+            w->quit();
+            w->wait(3000);
         }
     }
 
 protected:
     void incomingConnection(qintptr socketDescriptor) override{
-        QThread *thread = new QThread(this);
-        ChatTask* task = new ChatTask(socketDescriptor);
-        task->moveToThread(thread);
+        // 选择负载最小的 worker 线程
+        WorkerThread *worker = leastLoadedWorker();
 
+        ChatTask* task = new ChatTask(socketDescriptor);
+        worker->incrementCount();
+
+        // 信号-槽连接（task 此时还在主线程，可以安全 connect）
         connect(task,&ChatTask::sendMessageToClient,this,&ChatServer::handledMessage);
         connect(task,&ChatTask::sendFileToClient,this,&ChatServer::handleFile);
         connect(task,&ChatTask::socketDisconnected,this,&ChatServer::onClientDisconnected);
         connect(task,&ChatTask::userOnline,this,&ChatServer::onUserOnline);
-        connect(task, &ChatTask::finished, thread, &QThread::quit);
-        connect(task, &ChatTask::finished, task, &QObject::deleteLater);
-        connect(thread, &QThread::started, task, &ChatTask::start);
-        connect(thread, &QThread::finished, thread, &QObject::deleteLater);
 
-        connect(thread, &QThread::finished, this, [this, task]() {
+        // task 完成时：减少计数、清理 map、销毁 task
+        connect(task, &ChatTask::finished, this, [this, worker, task]() {
+            worker->decrementCount();
+
             QWriteLocker locker(&mapLock);
             auto it = clientTaskMap->begin();
             while (it != clientTaskMap->end()) {
@@ -65,14 +75,30 @@ protected:
                 }
             }
         });
+        connect(task, &ChatTask::finished, task, &QObject::deleteLater);
 
-        thread->start();//触发线程的 started 信号，进而调用 task 的 start 方法，完成套接字的初始化和信号连接
+        // 将 task 移入 worker 线程，并在其事件循环中启动
+        task->moveToThread(worker);
+        QMetaObject::invokeMethod(task, "start", Qt::QueuedConnection);
     }
 
 private:
     QMap<QString, QPointer<ChatTask>> *clientTaskMap;
 
     QReadWriteLock mapLock;
+
+    QVector<WorkerThread*> m_workers;
+
+    // 从 worker 池中选出当前连接数最少的线程
+    WorkerThread* leastLoadedWorker() const {
+        WorkerThread *best = m_workers.first();
+        for (int i = 1; i < m_workers.size(); ++i) {
+            if (m_workers[i]->connectionCount() < best->connectionCount()) {
+                best = m_workers[i];
+            }
+        }
+        return best;
+    }
 
     //获取本地ip地址
     QString read_ip_address()

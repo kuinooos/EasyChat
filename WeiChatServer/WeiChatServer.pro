@@ -23,4 +23,5 @@ else: unix:!android: target.path = /opt/$${TARGET}/bin
 HEADERS += \
     chatserver.h \
     chattask.h \
-    friendserver.h
+    friendserver.h \
+    workerthread.h
