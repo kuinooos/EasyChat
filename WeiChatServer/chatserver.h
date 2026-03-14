@@ -22,7 +22,7 @@ public:
 
         // 创建固定数量的 Worker 线程（= CPU 逻辑核心数）
         int workerCount = QThread::idealThreadCount();
-        if (workerCount <= 0) workerCount = 4; // 兜底
+        if (workerCount <= 0) workerCount = 4;
         for (int i = 0; i < workerCount; ++i) {
             auto *w = new WorkerThread(this);
             w->start();
@@ -35,115 +35,35 @@ public:
         }else{
             qDebug() << "Failed to start IPv6 chat server!";
         }
-
-    
     };
 
     ~ChatServer() override {
-        // 通知所有 worker 线程退出事件循环并等待
         for (WorkerThread *w : m_workers) {
             w->quit();
             w->wait(3000);
         }
     }
 
-protected:
-    void incomingConnection(qintptr socketDescriptor) override{
-        // 选择负载最小的 worker 线程
-        WorkerThread *worker = leastLoadedWorker();
+    // ────────────────────────────────────────────────────────
+    // 纯路由接口：ChatServer 只负责"查表 + 转发"，不关心业务细节
+    // ────────────────────────────────────────────────────────
 
-        ChatTask* task = new ChatTask(socketDescriptor);
-        worker->incrementCount();
-
-        // 信号-槽连接（task 此时还在主线程，可以安全 connect）
-        connect(task,&ChatTask::sendMessageToClient,this,&ChatServer::handledMessage);
-        connect(task,&ChatTask::sendFileToClient,this,&ChatServer::handleFile);
-        connect(task,&ChatTask::socketDisconnected,this,&ChatServer::onClientDisconnected);
-        connect(task,&ChatTask::userOnline,this,&ChatServer::onUserOnline);
-
-        // task 完成时：减少计数、清理 map、销毁 task
-        connect(task, &ChatTask::finished, this, [this, worker, task]() {
-            worker->decrementCount();
-
-            QWriteLocker locker(&mapLock);
-            auto it = clientTaskMap->begin();
-            while (it != clientTaskMap->end()) {
-                if (it.value() == task) {
-                    it = clientTaskMap->erase(it);
-                } else {
-                    ++it;
-                }
-            }
-        });
-        connect(task, &ChatTask::finished, task, &QObject::deleteLater);
-
-        // 将 task 移入 worker 线程，并在其事件循环中启动
-        task->moveToThread(worker);
-        QMetaObject::invokeMethod(task, "start", Qt::QueuedConnection);
-    }
-
-private:
-    QMap<QString, QPointer<ChatTask>> *clientTaskMap;
-
-    QReadWriteLock mapLock;
-
-    QVector<WorkerThread*> m_workers;
-
-    // 从 worker 池中选出当前连接数最少的线程
-    WorkerThread* leastLoadedWorker() const {
-        WorkerThread *best = m_workers.first();
-        for (int i = 1; i < m_workers.size(); ++i) {
-            if (m_workers[i]->connectionCount() < best->connectionCount()) {
-                best = m_workers[i];
-            }
-        }
-        return best;
-    }
-
-    //获取本地ip地址
-    QString read_ip_address()
-    {
-        QString ip_address;
-        QList<QHostAddress> ipAddressesList = QNetworkInterface::allAddresses();
-        for (int i = 0; i < ipAddressesList.size(); ++i)
-        {
-            if (ipAddressesList.at(i) != QHostAddress::LocalHost &&  ipAddressesList.at(i).toIPv4Address())
-            {
-                ip_address = ipAddressesList.at(i).toString();
-                qDebug()<<ip_address;  //debug
-                //break;
-            }
-        }
-        if (ip_address.isEmpty())
-            ip_address = QHostAddress(QHostAddress::LocalHost).toString();
-        return ip_address;
-    }
-
-
-private slots:
-    void onUserOnline(const QString &username) {
-        ChatTask *task = qobject_cast<ChatTask*>(sender());
-        if (!task) {
-            return;
-        }
-
-        //读表前加读写锁
+    // 注册上线用户
+    void registerUser(const QString &username, ChatTask *task) {
         QWriteLocker locker(&mapLock);
         clientTaskMap->insert(username, task);
     }
 
-    void onClientDisconnected(const QString &clientIdentifier){
-        qDebug() << "一个客户端已经从map中移除" << clientIdentifier;
-
-        //从图中移除
+    // 注销离线用户
+    void unregisterUser(const QString &username) {
+        qDebug() << "一个客户端已经从map中移除" << username;
         QWriteLocker locker(&mapLock);
-        clientTaskMap->remove(clientIdentifier);
+        clientTaskMap->remove(username);
     }
 
-    void handledMessage(const QString& sender,const QString& receiver,const QString& message){
-        if(message==sender){
-            return;
-        }
+    // 路由消息：找到接收方并转发；接收方不在线则异步写库
+    void routeMessage(const QString &sender, const QString &receiver, const QString &message) {
+        if (message == sender) return;
 
         QPointer<ChatTask> receiverTask;
         {
@@ -151,27 +71,27 @@ private slots:
             receiverTask = clientTaskMap->value(receiver);
         }
 
-        if(!receiverTask.isNull()){
+        if (!receiverTask.isNull()) {
             QMetaObject::invokeMethod(receiverTask.data(), "deliverMessage", Qt::QueuedConnection,
                                       Q_ARG(QString, sender),
                                       Q_ARG(QString, message));
             qDebug() << "已发送消息给" << receiver;
-        }else{
+        } else {
             ChatTask::persistOfflineMessageAsync(sender, receiver, message);
             qDebug() << "用户不在线，消息转为离线存储" << receiver;
         }
     }
 
-    //发送FILE、文件名、文件大小、文件发送者、文件数据给对应客户端
-    void handleFile(const QString& sender,const QString& receiver,const QString& fileName,
-                    qint64 fileSize,const QString& filePath){
+    // 路由文件：找到接收方并转发；接收方不在线则异步写库
+    void routeFile(const QString &sender, const QString &receiver,
+                   const QString &fileName, qint64 fileSize, const QString &filePath) {
         QPointer<ChatTask> receiverTask;
         {
             QReadLocker locker(&mapLock);
             receiverTask = clientTaskMap->value(receiver);
         }
 
-        if(!receiverTask.isNull()){
+        if (!receiverTask.isNull()) {
             QMetaObject::invokeMethod(receiverTask.data(), "deliverFile", Qt::QueuedConnection,
                                       Q_ARG(QString, sender),
                                       Q_ARG(QString, receiver),
@@ -181,5 +101,44 @@ private slots:
         } else {
             ChatTask::persistOfflineFileAsync(sender, receiver, filePath);
         }
+    }
+
+protected:
+    void incomingConnection(qintptr socketDescriptor) override{
+        WorkerThread *worker = leastLoadedWorker();
+
+        // 将 this（路由器）注入 ChatTask，task 自己向路由器申请转发
+        // parent 必须为 nullptr，否则无法 moveToThread
+        ChatTask* task = new ChatTask(socketDescriptor, this, nullptr);
+        worker->incrementCount();
+
+        // finished：减少线程计数，并确保从路由表里清除（handleSocketDisconnect 通常已处理，这里做兜底）
+        connect(task, &ChatTask::finished, this, [this, worker, task]() {
+            worker->decrementCount();
+            QWriteLocker locker(&mapLock);
+            auto it = clientTaskMap->begin();
+            while (it != clientTaskMap->end()) {
+                if (it.value() == task) { it = clientTaskMap->erase(it); }
+                else { ++it; }
+            }
+        });
+        connect(task, &ChatTask::finished, task, &QObject::deleteLater);
+
+        task->moveToThread(worker);
+        QMetaObject::invokeMethod(task, "start", Qt::QueuedConnection);
+    }
+
+private:
+    QMap<QString, QPointer<ChatTask>> *clientTaskMap;
+    QReadWriteLock mapLock;
+    QVector<WorkerThread*> m_workers;
+
+    WorkerThread* leastLoadedWorker() const {
+        WorkerThread *best = m_workers.first();
+        for (int i = 1; i < m_workers.size(); ++i) {
+            if (m_workers[i]->connectionCount() < best->connectionCount())
+                best = m_workers[i];
+        }
+        return best;
     }
 };
