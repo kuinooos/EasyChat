@@ -1,0 +1,34 @@
+# Qt build directories
+build-*/
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.exe
+*.so
+*.dylib
+
+# Qt generated files
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+*.moc
+Makefile
+Makefile.*
+.qmake.stash
+*.pro.user
+*.pro.user.*
+
+# Debug/Release output
+debug/
+release/
+
+# IDE files
+.vscode/
+.idea/
+*.user
+
+# Logs
+*.log

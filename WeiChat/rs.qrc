@@ -1,0 +1,29 @@
+<RCC>
+    <qresource prefix="/">
+        <file>png/friend.png</file>
+        <file>png/left_1.png</file>
+        <file>png/left_3.png</file>
+        <file>png/left_4.png</file>
+        <file>png/left_bt1.png</file>
+        <file>png/other.png</file>
+        <file>png/phone.png</file>
+        <file>png/user.png</file>
+        <file>png/user_img.jpg</file>
+        <file>png/weichat.png</file>
+        <file>png/more.png</file>
+        <file>png/expression.png</file>
+        <file>png/jietu.png</file>
+        <file>png/ltwj.png</file>
+        <file>png/record.png</file>
+        <file>style/stylesheet.qss</file>
+        <file>png/grey_209.png</file>
+        <file>png/grey_226.png</file>
+        <file>png/fyy.jpg</file>
+        <file>png/hds.jpg</file>
+        <file>png/htl.jpg</file>
+        <file>png/lyy.jpg</file>
+        <file>png/myy.jpg</file>
+        <file>png/xxg.jpg</file>
+        <file>png/xyy.jpg</file>
+    </qresource>
+</RCC>

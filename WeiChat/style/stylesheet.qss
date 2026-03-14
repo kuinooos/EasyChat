@@ -1,0 +1,24 @@
+#side_bar{
+background:rgb(46,46,46)
+}
+#chat_data_wid{
+background:rgb(245,245,245)
+}
+#funct_wid{
+
+}
+#send_wid{
+
+}
+#chat_data_list{
+
+}
+QPushButton#send_btn{
+color:GREEN
+}
+#search_wid{
+     background-color:rgb(247,247,247);
+}
+#search_edit {
+    border: 2px solid #f1f1f1;
+}
