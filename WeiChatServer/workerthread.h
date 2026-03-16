@@ -11,7 +11,7 @@ class WorkerThread : public QThread
 public:
     explicit WorkerThread(QObject *parent = nullptr) : QThread(parent) {}
 
-    // 线程入口：只跑事件循环，等待事件投递
+    // 线程入口：只跑事件循环，等待事件投递 
     void run() override { exec(); }
 
     // 当前管理的连接数

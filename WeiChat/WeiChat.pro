@@ -20,7 +20,8 @@ SOURCES += \
     loadingdlg.cpp \
     main.cpp \
     mainwindow.cpp \
-    server_config.cpp
+    server_config.cpp \
+    chatfilewid.cpp
 
 HEADERS += \
     chat_dialog.h \
@@ -32,13 +33,15 @@ HEADERS += \
     listitembase.h \
     loadingdlg.h \
     mainwindow.h \
-    server_config.h
+    server_config.h \
+    chatfilewid.h
 
 FORMS += \
     chat_dialog.ui \
     chatuserwid.ui \
     loadingdlg.ui \
-    mainwindow.ui
+    mainwindow.ui \
+    chatfilewid.ui
 
 # Default rules for deployment.
 qnx: target.path = /tmp/$${TARGET}/bin

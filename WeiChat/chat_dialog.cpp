@@ -14,6 +14,11 @@
 #include<QStringList>
 #include<vector>
 #include<chatuserwid.h>
+#include<QFileDialog>
+#include<QFileInfo>
+#include<QDir>
+#include<QMouseEvent>
+#include<QUuid>
 Chat_Dialog::Chat_Dialog(const QString &username, const ServerConfig &serverConfig, QWidget *parent)
     : QDialog(parent)
     , ui(new Ui::Chat_Dialog)
@@ -57,6 +62,9 @@ Chat_Dialog::Chat_Dialog(const QString &username, const ServerConfig &serverConf
 
     addChatUSerList();
     initializeConnection();
+
+    ui->file_lb->installEventFilter(this);
+    ui->file_lb->setCursor(Qt::PointingHandCursor);
 }
 
 Chat_Dialog::~Chat_Dialog()
@@ -104,6 +112,7 @@ void Chat_Dialog::initializeConnection()
 {
     connect(socket, &QTcpSocket::readyRead, this, &Chat_Dialog::on_readyRead);
     connect(socket, &QTcpSocket::disconnected, this, &Chat_Dialog::on_disconnected);
+    connect(socket, &QAbstractSocket::bytesWritten, this, &Chat_Dialog::onBytesSent);
 
     socket->connectToHost(serverConfig.host, serverConfig.chatPort);
     if (!socket->waitForConnected(3000)) {
@@ -306,18 +315,232 @@ void Chat_Dialog::on_send_btn_clicked()
 
 void Chat_Dialog::on_readyRead()
 {
-    while (socket->canReadLine()) {
-        QString message = socket->readLine().trimmed();
+    m_recvBuf.append(socket->readAll());
+    processPendingData();
+}
+
+void Chat_Dialog::processPendingData()
+{
+    while (true) {
+        if (m_recvFile) {
+            if (!consumeFileBytes()) break;
+            continue;
+        }
+
+        int nl = m_recvBuf.indexOf('\n');
+        if (nl < 0) break;
+
+        QByteArray lineData = m_recvBuf.left(nl);
+        m_recvBuf.remove(0, nl + 1);
+        QString message = QString::fromUtf8(lineData).trimmed();
+
+        if (message.isEmpty()) continue;
+
         if (message.startsWith(QStringLiteral("MESSAGE::"))) {
             const QStringList parts = message.split(QStringLiteral("::"));
             if (parts.size() >= 3) {
                 const QString sender = parts.value(1);
                 const QString content = parts.mid(2).join(QStringLiteral("::"));
                 ui->listWidget->addItem(sender + QStringLiteral(": ") + content);
-                continue;
+            }
+        } else if (message.startsWith(QStringLiteral("FILE::"))) {
+            const QStringList parts = message.split(QStringLiteral("::"));
+            if (parts.size() >= 5) {
+                m_inFileName = parts[1];
+                m_fileExp = parts[2].toLongLong();
+                m_inFileSender = parts[3];
+
+                m_fileGot = 0;
+                m_recvFile = m_fileExp > 0;
+                m_targetSavePath.clear();
+
+                // 微信模式：后台自动下载到临时文件夹
+                QString tempPath = QDir::tempPath() + "/WeiChat_recv_" + m_inFileName;
+                m_inFile.setFileName(tempPath);
+                if (!m_inFile.open(QIODevice::WriteOnly)) {
+                     // 如果临时文件打不开，可以用一个 uuid 命名重试
+                     tempPath = QDir::tempPath() + "/" + QUuid::createUuid().toString() + "_" + m_inFileName;
+                     m_inFile.setFileName(tempPath);
+                     m_inFile.open(QIODevice::WriteOnly);
+                }
+
+                // 创建气泡控件
+                m_currentRecvFileWid = new ChatFileWid(ChatFileWid::Receiver, m_inFileName, m_fileExp, m_inFileSender);
+                QListWidgetItem *item = new QListWidgetItem(ui->listWidget);
+                item->setSizeHint(m_currentRecvFileWid->sizeHint());
+                ui->listWidget->addItem(item);
+                ui->listWidget->setItemWidget(item, m_currentRecvFileWid);
+                
+                connect(m_currentRecvFileWid, &ChatFileWid::sig_downloadClicked, this, &Chat_Dialog::onDownloadClicked);
+
+                if (!m_recvBuf.isEmpty()) consumeFileBytes();
+            }
+        } else {
+            ui->listWidget->addItem(message);
+        }
+    }
+}
+
+bool Chat_Dialog::consumeFileBytes()
+{
+    if (!m_recvFile || !m_inFile.isOpen()) return false;
+    
+    qint64 remaining = m_fileExp - m_fileGot;
+    if (remaining <= 0) {
+        resetIncomingFileState();
+        return true;
+    }
+
+    qint64 chunkSize = qMin<qint64>(m_recvBuf.size(), remaining);
+    if (chunkSize <= 0) return false;
+
+    QByteArray chunk = m_recvBuf.left(static_cast<int>(chunkSize));
+    m_recvBuf.remove(0, static_cast<int>(chunkSize));
+    qint64 written = m_inFile.write(chunk);
+    if (written != chunk.size()) {
+        QMessageBox::warning(this, QStringLiteral("错误"), QStringLiteral("写入文件失败"));
+        resetIncomingFileState();
+        return false;
+    }
+
+    m_fileGot += written;
+    if (m_currentRecvFileWid) {
+        m_currentRecvFileWid->updateProgress(m_fileGot, m_fileExp);
+    }
+
+    if (m_fileGot >= m_fileExp) {
+        if (m_currentRecvFileWid) m_currentRecvFileWid->setCompleted();
+        
+        // 如果用户在下载中已经选好了路径，收完立即移动/拷贝过去
+        if (!m_targetSavePath.isEmpty()) {
+            m_inFile.close();
+            QFile::remove(m_targetSavePath); // 先删除已存在的
+            if (QFile::copy(m_inFile.fileName(), m_targetSavePath)) {
+                QMessageBox::information(this, QStringLiteral("提示"), QStringLiteral("文件已保存至：") + m_targetSavePath);
             }
         }
-        ui->listWidget->addItem(message);
+        resetIncomingFileState();
+        return true;
+    }
+
+    return !m_recvBuf.isEmpty();
+}
+
+void Chat_Dialog::resetIncomingFileState()
+{
+    if (m_inFile.isOpen()) m_inFile.close();
+    m_recvFile = false;
+    m_fileExp = 0;
+    m_fileGot = 0;
+    m_inFileName.clear();
+    m_inFileSender.clear();
+    m_currentRecvFileWid = nullptr;
+}
+
+bool Chat_Dialog::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == ui->file_lb && event->type() == QEvent::MouseButtonPress) {
+        onFileClicked();
+        return true;
+    }
+    return QDialog::eventFilter(watched, event);
+}
+
+void Chat_Dialog::onFileClicked()
+{
+    if (currentPeer.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("提示"), QStringLiteral("请先在左侧选择聊天对象"));
+        return;
+    }
+    if (!socket || socket->state() != QAbstractSocket::ConnectedState) {
+        QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("未连接到服务器"));
+        return;
+    }
+
+    QString filePath = QFileDialog::getOpenFileName(this, QStringLiteral("选择要发送的文件"));
+    if (filePath.isEmpty()) return;
+
+    if (m_sendFile.isOpen()) {
+        QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("有文件正在发送中，请稍后再试"));
+        return;
+    }
+
+    QFileInfo fi(filePath);
+    m_sendFilePath = filePath;
+    m_sendFileSize = fi.size();
+    m_sendFileSent = 0;
+
+    m_sendFile.setFileName(filePath);
+    if (!m_sendFile.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, QStringLiteral("错误"), QStringLiteral("无法读取文件"));
+        return;
+    }
+
+    QString header = "FILE::" + fi.fileName() + "::" + QString::number(m_sendFileSize) +
+                     "::" + username + "::" + currentPeer + "\n";
+    socket->write(header.toUtf8());
+
+    // 创建发送端气泡
+    m_currentSendFileWid = new ChatFileWid(ChatFileWid::Sender, fi.fileName(), m_sendFileSize, currentPeer);
+    QListWidgetItem *item = new QListWidgetItem(ui->listWidget);
+    item->setSizeHint(m_currentSendFileWid->sizeHint());
+    ui->listWidget->addItem(item);
+    ui->listWidget->setItemWidget(item, m_currentSendFileWid);
+
+    sendNextChunk();
+}
+
+void Chat_Dialog::sendNextChunk()
+{
+    if (!m_sendFile.isOpen() || !socket) return;
+    QByteArray chunk = m_sendFile.read(SEND_CHUNK);
+    if (!chunk.isEmpty()) socket->write(chunk);
+}
+
+void Chat_Dialog::onBytesSent(qint64 bytes)
+{
+    if (!m_sendFile.isOpen()) return;
+
+    m_sendFileSent += bytes;
+    if (m_currentSendFileWid) {
+        m_currentSendFileWid->updateProgress(m_sendFileSent, m_sendFileSize);
+    }
+
+    if (m_sendFileSent >= m_sendFileSize || m_sendFile.atEnd()) {
+        m_sendFile.close();
+        if (m_currentSendFileWid) m_currentSendFileWid->setCompleted();
+        m_currentSendFileWid = nullptr;
+        m_sendFilePath.clear();
+        m_sendFileSize = 0;
+        m_sendFileSent = 0;
+        return;
+    }
+
+    if (socket->bytesToWrite() < SEND_CHUNK * 2) {
+        sendNextChunk();
+    }
+}
+
+void Chat_Dialog::onDownloadClicked(const QString &fileName, qint64 fileSize, const QString &peerName)
+{
+    Q_UNUSED(fileSize);
+    Q_UNUSED(peerName);
+
+    QString savePath = QFileDialog::getSaveFileName(this, QStringLiteral("另存为"), fileName);
+    if (savePath.isEmpty()) return;
+
+    m_targetSavePath = savePath;
+
+    // 如果文件已经接收全了（缓存在临时目录中）
+    if (!m_recvFile && QFile::exists(m_inFile.fileName())) {
+        if (QFile::copy(m_inFile.fileName(), m_targetSavePath)) {
+             QMessageBox::information(this, QStringLiteral("提示"), QStringLiteral("文件已保存至：") + m_targetSavePath);
+        } else {
+             QMessageBox::warning(this, QStringLiteral("错误"), QStringLiteral("保存失败，可能文件已被移动或权限不足"));
+        }
+    } else if (m_recvFile) {
+        // 如果还在下载中，只需设置 m_targetSavePath，在 consumeFileBytes 结束时会自动拷贝
+        QMessageBox::information(this, QStringLiteral("提示"), QStringLiteral("正在后台下载，完成后将自动保存到：") + m_targetSavePath);
     }
 }
 

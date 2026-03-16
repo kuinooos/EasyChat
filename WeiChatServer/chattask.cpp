@@ -1,7 +1,21 @@
 #include "chattask.h"
-#include "chatserver.h"  // 在 .cpp 中 include，打破 chattask.h ↔ chatserver.h 的循环依赖
+#include "chatserver.h"
+#include <QCoreApplication>
+#include <QDateTime>
+#include <QUuid>
+#include <QSqlError>
+#include <QSqlQuery>
+#include <QtConcurrent/QtConcurrent>
 
-// ── 初始化 socket（在 Worker 线程中被 invokeMethod 调用）──────────────
+ChatTask::ChatTask(qintptr socketDescriptor, ChatServer* router, QObject *parent)
+    : QObject(parent), socketDescriptor(socketDescriptor), m_router(router) {
+}
+
+ChatTask::~ChatTask() {
+    resetIncomingFileState(true);
+    resetOutgoingFileState(true);
+}
+
 void ChatTask::start() {
     m_socket = new QTcpSocket(this);
     if (!m_socket->setSocketDescriptor(socketDescriptor)) {
@@ -11,27 +25,42 @@ void ChatTask::start() {
     }
     connect(m_socket, &QTcpSocket::readyRead,    this, &ChatTask::onReadyRead);
     connect(m_socket, &QTcpSocket::disconnected, this, &ChatTask::handleSocketDisconnect);
-    // 异步文件发送回调：每次 socket 真正写出数据后触发
     connect(m_socket, &QAbstractSocket::bytesWritten, this, &ChatTask::onBytesWritten);
 }
 
-// ── 向本客户端投递文本消息────────────────────────────────────────────
+void ChatTask::onReadyRead() {
+    pendingBuffer.append(m_socket->readAll());
+    processPendingData();
+}
+
+void ChatTask::processPendingData() {
+    while (true) {
+        if (receivingFile) {
+            if (!consumeFileBytes()) break;
+            continue;
+        }
+        const int newlineIndex = pendingBuffer.indexOf('\n');
+        if (newlineIndex < 0) break;
+
+        QByteArray lineData = pendingBuffer.left(newlineIndex);
+        pendingBuffer.remove(0, newlineIndex + 1);
+        const QString message = QString::fromUtf8(lineData).trimmed();
+        if (!message.isEmpty()) processControlMessage(message);
+    }
+}
+
 void ChatTask::deliverMessage(const QString &sender, const QString &message) {
     if (!m_socket || m_socket->state() != QAbstractSocket::ConnectedState) return;
     m_socket->write(("MESSAGE::" + sender + "::" + message + "\n").toUtf8());
 }
 
-// ── 向本客户端投递文件（异步分片写，不阻塞 Worker 事件循环）──────────
 void ChatTask::deliverFile(const QString &sender, const QString &receiver,
                            const QString &fileName, qint64 fileSize, const QString &filePath) {
     if (!m_socket || m_socket->state() != QAbstractSocket::ConnectedState) {
         QFile::remove(filePath);
         return;
     }
-
-    // 若上一次文件还没发完，先清理（理论上不应重入，但做防御处理）
     resetOutgoingFileState(false);
-
     m_outFile.setFileName(filePath);
     if (!m_outFile.open(QIODevice::ReadOnly)) {
         qWarning() << "无法读取待转发文件" << filePath;
@@ -42,28 +71,19 @@ void ChatTask::deliverFile(const QString &sender, const QString &receiver,
     m_outFileSize = fileSize;
     m_outFileSent = 0;
 
-    // 发送文件头（一行协议，轻量级，立刻写出）
     const QString header = "FILE::" + fileName + "::" + QString::number(fileSize)
                          + "::" + sender + "::" + receiver + "\n";
     m_socket->write(header.toUtf8());
-
-    // 发第一片；后续由 onBytesWritten 驱动
     writeNextFileChunk();
 }
 
-// ── 异步文件分片发送：每次 bytesWritten 后发下一片────────────────────
 void ChatTask::onBytesWritten(qint64 bytes) {
-    if (!m_outFile.isOpen()) return;  // 没有正在发送的文件，忽略
-
+    if (!m_outFile.isOpen()) return;
     m_outFileSent += bytes;
-
     if (m_outFileSent >= m_outFileSize || m_outFile.atEnd()) {
-        qDebug() << "文件发送完成:" << m_outFilePath;
-        resetOutgoingFileState(true);  // 关闭并删除临时文件
+        resetOutgoingFileState(true);
         return;
     }
-
-    // 只有当发送缓冲区快排空时再写下一片，防止内存不断堆积
     if (m_socket->bytesToWrite() < OUT_CHUNK * 2) {
         writeNextFileChunk();
     }
@@ -74,11 +94,9 @@ void ChatTask::writeNextFileChunk() {
     const QByteArray chunk = m_outFile.read(OUT_CHUNK);
     if (!chunk.isEmpty()) {
         m_socket->write(chunk);
-        // write() 立即返回，实际发送由事件循环完成，writeNextChunk 由 bytesWritten 驱动
     }
 }
 
-// ── 连接断开处理：直接通知路由器注销──────────────────────────────────
 void ChatTask::handleSocketDisconnect() {
     const QString id = username;
     if (m_socket) {
@@ -89,61 +107,113 @@ void ChatTask::handleSocketDisconnect() {
     emit finished();
 }
 
-// ── 协议解析：处理控制消息，ONLINE 注册、FILE 头、普通消息─────────────
 void ChatTask::processControlMessage(const QString &message) {
     const QStringList parts = message.split("::");
     if (parts.isEmpty()) return;
 
-    // 用户上线：直接向路由器注册自己
     if (parts[0] == "ONLINE") {
-        if (parts.size() < 2) { qWarning() << "Invalid ONLINE message:" << message; return; }
+        if (parts.size() < 2) return;
         username = parts[1];
         if (m_router) m_router->registerUser(username, this);
         return;
     }
 
-    // 文件头：开始接收文件数据
     if (parts[0] == "FILE") {
-        if (parts.size() < 5) { qWarning() << "Invalid FILE header:" << message; return; }
-        fileName        = parts.value(1);
-        fileExpectedSize= parts.value(2).toLongLong();
-        fileSender      = parts.value(3);
-        fileReceiver    = parts.value(4);
-        fileReceivedSize= 0;
-        receivingFile   = fileExpectedSize > 0;
-        tempFilePath    = buildTempFilePath(fileName);
-
+        if (parts.size() < 5) return;
+        fileName = parts.value(1);
+        fileExpectedSize = parts.value(2).toLongLong();
+        fileSender = parts.value(3);
+        fileReceiver = parts.value(4);
+        fileReceivedSize = 0;
+        receivingFile = fileExpectedSize > 0;
+        tempFilePath = buildTempFilePath(fileName);
         currentFile.setFileName(tempFilePath);
         if (!currentFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            qWarning() << "Failed to open temp file:" << tempFilePath;
             resetIncomingFileState(true);
             return;
         }
-        qDebug() << "接收到文件头" << fileName << fileExpectedSize << "bytes";
         if (!receivingFile) { finalizeIncomingFile(); return; }
         if (!pendingBuffer.isEmpty()) consumeFileBytes();
         return;
     }
 
-    // 普通文本消息
-    if (parts.size() < 2) { qWarning() << "Invalid message format:" << message; return; }
-    const QString sender   = parts.value(0);
+    if (parts.size() < 2) return;
+    const QString sender = parts.value(0);
     const QString receiver = parts.value(1);
-    const QString content  = parts.mid(2).join("::");
+    const QString content = parts.mid(2).join("::");
     handleSendMessage(sender, receiver, content);
 }
 
-// ── 文件接收完毕：交给路由器转发──────────────────────────────────────
+bool ChatTask::consumeFileBytes() {
+    if (!receivingFile || !currentFile.isOpen()) return false;
+    const qint64 remaining = fileExpectedSize - fileReceivedSize;
+    if (remaining <= 0) { finalizeIncomingFile(); return true; }
+    const qint64 chunkSize = qMin<qint64>(pendingBuffer.size(), remaining);
+    if (chunkSize <= 0) return false;
+    const QByteArray chunk = pendingBuffer.left(chunkSize);
+    pendingBuffer.remove(0, static_cast<int>(chunkSize));
+    const qint64 written = currentFile.write(chunk);
+    if (written != chunk.size()) {
+        resetIncomingFileState(true);
+        return false;
+    }
+    fileReceivedSize += written;
+    if (fileReceivedSize >= fileExpectedSize) { finalizeIncomingFile(); return true; }
+    return !pendingBuffer.isEmpty();
+}
+
 void ChatTask::finalizeIncomingFile() {
     currentFile.flush();
     currentFile.close();
     receivingFile = false;
-    qDebug() << "文件接收完成：" << fileName << "大小：" << fileReceivedSize;
     handleSendFile(fileSender, fileReceiver, fileName, fileExpectedSize, tempFilePath);
     resetIncomingFileState(false);
 }
 
-// ── 路由请求：直接调路由器，无信号中转─────────────────────────────────
+QString ChatTask::generateUniqueConnectionName() {
+    return QString("%1_%2_%3")
+        .arg(QCoreApplication::applicationPid())
+        .arg(QDateTime::currentMSecsSinceEpoch())
+        .arg(QUuid::createUuid().toString());
+}
+
+QSqlDatabase ChatTask::openDatabase(QString &connectionName) {
+    connectionName = generateUniqueConnectionName();
+    QSqlDatabase db = QSqlDatabase::addDatabase("QODBC", connectionName);
+    db.setDatabaseName("Driver={SQL Server};Server=(local);Database=ChatApp;Trusted_Connection=yes;");
+    if (!db.open()) qWarning() << "Database connection failed:" << db.lastError().text();
+    return db;
+}
+
+void ChatTask::closeDatabase(QSqlDatabase &db, const QString &connectionName) {
+    if (db.isOpen()) db.close();
+    db = QSqlDatabase();
+    QSqlDatabase::removeDatabase(connectionName);
+}
+
+QString ChatTask::buildTempFilePath(const QString &incomingFileName) const {
+    const QString safeName = incomingFileName.isEmpty() ? "incoming.bin" : incomingFileName;
+    return QDir::temp().filePath(generateUniqueConnectionName() + "_" + safeName);
+}
+
+void ChatTask::resetIncomingFileState(bool removeTempFile) {
+    receivingFile = false;
+    fileExpectedSize = 0;
+    fileReceivedSize = 0;
+    fileSender.clear(); fileReceiver.clear(); fileName.clear();
+    if (currentFile.isOpen()) currentFile.close();
+    if (removeTempFile && !tempFilePath.isEmpty()) QFile::remove(tempFilePath);
+    tempFilePath.clear();
+    currentFile.setFileName(QString());
+}
+
+void ChatTask::resetOutgoingFileState(bool removeTemp) {
+    if (m_outFile.isOpen()) m_outFile.close();
+    if (removeTemp && !m_outFilePath.isEmpty()) QFile::remove(m_outFilePath);
+    m_outFilePath.clear(); m_outFileSize = 0; m_outFileSent = 0;
+    m_outFile.setFileName(QString());
+}
+
 void ChatTask::handleSendMessage(const QString &sender, const QString &receiver, const QString &content) {
     if (m_router) m_router->routeMessage(sender, receiver, content);
 }
@@ -151,4 +221,37 @@ void ChatTask::handleSendMessage(const QString &sender, const QString &receiver,
 void ChatTask::handleSendFile(const QString &sender, const QString &receiver,
                               const QString &fileName, qint64 fileSize, const QString &filePath) {
     if (m_router) m_router->routeFile(sender, receiver, fileName, fileSize, filePath);
+}
+
+void ChatTask::persistOfflineMessageAsync(const QString &sender, const QString &receiver, const QString &message) {
+    QtConcurrent::run([sender, receiver, message]() {
+        QString connectionName;
+        QSqlDatabase db = openDatabase(connectionName);
+        if (!db.isOpen()) { closeDatabase(db, connectionName); return; }
+        QSqlQuery query(db);
+        query.prepare("INSERT INTO messages(sender_id,receiver_id,message_text,send_time) VALUES(:username,:friendname,:content,:send_time)");
+        query.bindValue(":username", sender); query.bindValue(":friendname", receiver);
+        query.bindValue(":content", message); query.bindValue(":send_time", QDateTime::currentDateTime());
+        if (!query.exec()) qWarning() << "离线消息写入失败" << query.lastError().text();
+        closeDatabase(db, connectionName);
+    });
+}
+
+void ChatTask::persistOfflineFileAsync(const QString &sender, const QString &receiver, const QString &filePath) {
+    QtConcurrent::run([sender, receiver, filePath]() {
+        QFile file(filePath);
+        if (!file.open(QIODevice::ReadOnly)) { QFile::remove(filePath); return; }
+        const QByteArray fileData = file.readAll();
+        file.close();
+        QString connectionName;
+        QSqlDatabase db = openDatabase(connectionName);
+        if (!db.isOpen()) { closeDatabase(db, connectionName); QFile::remove(filePath); return; }
+        QSqlQuery query(db);
+        query.prepare("INSERT INTO messages(sender_id,receiver_id,message_text,send_time) VALUES(:username,:friendname,:content,:send_time)");
+        query.bindValue(":username", sender); query.bindValue(":friendname", receiver);
+        query.bindValue(":content", fileData.toBase64()); query.bindValue(":send_time", QDateTime::currentDateTime());
+        if (!query.exec()) qWarning() << "离线文件写入失败" << query.lastError().text();
+        closeDatabase(db, connectionName);
+        QFile::remove(filePath);
+    });
 }
