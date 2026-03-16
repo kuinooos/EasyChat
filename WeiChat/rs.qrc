@@ -25,5 +25,18 @@
         <file>png/myy.jpg</file>
         <file>png/xxg.jpg</file>
         <file>png/xyy.jpg</file>
+        <file>svg/send.svg</file>
+        <file>svg/attach.svg</file>
+        <file>svg/emoji.svg</file>
+        <file>svg/more.svg</file>
+        <file>svg/minimize.svg</file>
+        <file>svg/maximize.svg</file>
+        <file>svg/close.svg</file>
+        <file>svg/search.svg</file>
+        <file>svg/add.svg</file>
+        <file>svg/download.svg</file>
+        <file>svg/file.svg</file>
+        <file>svg/sun.svg</file>
+        <file>svg/moon.svg</file>
     </qresource>
 </RCC>

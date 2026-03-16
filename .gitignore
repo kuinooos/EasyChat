@@ -30,5 +30,12 @@ release/
 .idea/
 *.user
 
+# QMake object script files
+object_script.*.Debug
+object_script.*.Release
+
+# Qt resource compiler output
+*_resource.rc
+
 # Logs
 *.log

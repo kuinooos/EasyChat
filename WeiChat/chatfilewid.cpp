@@ -1,6 +1,8 @@
 #include "chatfilewid.h"
 #include "ui_chatfilewid.h"
+#include "animatediconbutton.h"
 #include <QFileInfo>
+#include <QPixmap>
 
 ChatFileWid::ChatFileWid(Mode mode, const QString &fileName, qint64 fileSize, const QString &peerName, QWidget *parent) :
     QWidget(parent),
@@ -13,9 +15,24 @@ ChatFileWid::ChatFileWid(Mode mode, const QString &fileName, qint64 fileSize, co
     ui->setupUi(this);
     ui->file_name_lb->setText(fileName);
     ui->file_size_lb->setText(formatSize(fileSize));
+    ui->file_icon_lb->setPixmap(QPixmap(":/svg/file.svg"));
     ui->progressBar->setRange(0, 100);
     ui->progressBar->setValue(0);
     ui->ok_lb->hide();
+
+    if (ui->download_btn) {
+        auto *btn = new AnimatedIconButton(ui->download_btn->parentWidget());
+        btn->setObjectName("download_btn");
+        btn->setSvgIcon(":/svg/download.svg");
+        btn->setFixedSize(30, 30);
+        btn->setToolTip(QStringLiteral("下载"));
+        if (auto *layout = ui->download_btn->parentWidget()->layout()) {
+            layout->replaceWidget(ui->download_btn, btn);
+        }
+        ui->download_btn->deleteLater();
+        ui->download_btn = btn;
+        connect(btn, &QPushButton::clicked, this, &ChatFileWid::on_download_btn_clicked);
+    }
 
     if (m_mode == Sender) {
         ui->download_btn->hide();

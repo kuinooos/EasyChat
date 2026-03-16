@@ -10,17 +10,36 @@
 #include <QPushButton>
 #include <QTcpSocket>
 #include <QVBoxLayout>
+#include "animatediconbutton.h"
+#include "titlebar.h"
+#include <QApplication>
+#include <QStyle>
 
 LoginDialog::LoginDialog(QWidget *parent)
     : QDialog(parent)
     , currentConfig(ServerConfig::load())
 {
     setWindowTitle(QStringLiteral("登录 EasyChat"));
+    setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
+    setAttribute(Qt::WA_TranslucentBackground, false);
+    setObjectName("app_root");
     setModal(true);
     resize(420, 320);
 
     auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(16, 16, 16, 16);
+    layout->setSpacing(12);
+    auto *titleBar = new TitleBar(this);
+    titleBar->setTitle(QStringLiteral("登录 EasyChat"));
+    if (auto *maxBtn = titleBar->findChild<AnimatedIconButton *>("title_max_btn")) {
+        maxBtn->hide();
+    }
+
     auto *titleLabel = new QLabel(QStringLiteral("请输入账号信息"), this);
+    QFont titleFont = titleLabel->font();
+    titleFont.setPointSize(16);
+    titleFont.setBold(true);
+    titleLabel->setFont(titleFont);
     auto *formLayout = new QFormLayout();
 
     usernameEdit = new QLineEdit(this);
@@ -32,8 +51,17 @@ LoginDialog::LoginDialog(QWidget *parent)
     friendPortEdit = new QLineEdit(QString::number(currentConfig.friendPort), this);
     offlinePortEdit = new QLineEdit(QString::number(currentConfig.offlinePort), this);
     statusLabel = new QLabel(this);
-    loginButton = new QPushButton(QStringLiteral("登录"), this);
-    auto *cancelButton = new QPushButton(QStringLiteral("取消"), this);
+    loginButton = new AnimatedIconButton(this);
+    loginButton->setObjectName("login_btn");
+    static_cast<AnimatedIconButton *>(loginButton)->setSvgIcon(":/svg/send.svg");
+    loginButton->setToolTip(QStringLiteral("登录"));
+    loginButton->setFixedSize(36, 32);
+
+    auto *cancelButton = new AnimatedIconButton(this);
+    cancelButton->setObjectName("cancel_btn");
+    cancelButton->setSvgIcon(":/svg/close.svg");
+    cancelButton->setToolTip(QStringLiteral("取消"));
+    cancelButton->setFixedSize(36, 32);
 
     passwordEdit->setEchoMode(QLineEdit::Password);
     loginPortEdit->setValidator(new QIntValidator(1, 65535, loginPortEdit));
@@ -42,6 +70,19 @@ LoginDialog::LoginDialog(QWidget *parent)
     friendPortEdit->setValidator(new QIntValidator(1, 65535, friendPortEdit));
     offlinePortEdit->setValidator(new QIntValidator(1, 65535, offlinePortEdit));
     statusLabel->setStyleSheet(QStringLiteral("color:#c0392b;"));
+
+    QFont labelFont = font();
+    labelFont.setPointSize(13);
+    QFont inputFont = font();
+    inputFont.setPointSize(14);
+    usernameEdit->setFont(inputFont);
+    passwordEdit->setFont(inputFont);
+    hostEdit->setFont(inputFont);
+    loginPortEdit->setFont(inputFont);
+    registerPortEdit->setFont(inputFont);
+    chatPortEdit->setFont(inputFont);
+    friendPortEdit->setFont(inputFont);
+    offlinePortEdit->setFont(inputFont);
 
     formLayout->addRow(QStringLiteral("用户名"), usernameEdit);
     formLayout->addRow(QStringLiteral("密码"), passwordEdit);
@@ -52,6 +93,12 @@ LoginDialog::LoginDialog(QWidget *parent)
     formLayout->addRow(QStringLiteral("好友端口"), friendPortEdit);
     formLayout->addRow(QStringLiteral("下线端口"), offlinePortEdit);
 
+    for (auto *label : findChildren<QLabel*>()) {
+        if (label != titleLabel) {
+            label->setFont(labelFont);
+        }
+    }
+
     hostEdit->setPlaceholderText(QStringLiteral("输入 IPv6 地址或域名，例如 240a:... 或 chat.example.com"));
 
     auto *buttonLayout = new QHBoxLayout();
@@ -59,6 +106,7 @@ LoginDialog::LoginDialog(QWidget *parent)
     buttonLayout->addWidget(cancelButton);
     buttonLayout->addWidget(loginButton);
 
+    layout->addWidget(titleBar);
     layout->addWidget(titleLabel);
     layout->addLayout(formLayout);
     layout->addWidget(statusLabel);
@@ -67,6 +115,33 @@ LoginDialog::LoginDialog(QWidget *parent)
 
     connect(loginButton, &QPushButton::clicked, this, &LoginDialog::attemptLogin);
     connect(cancelButton, &QPushButton::clicked, this, &LoginDialog::reject);
+    connect(titleBar, &TitleBar::sigClose, this, &LoginDialog::reject);
+    connect(titleBar, &TitleBar::sigMinimize, this, &LoginDialog::showMinimized);
+    connect(titleBar, &TitleBar::sigToggleTheme, this, [this]() {
+        const QString current = property("theme").toString().isEmpty() ? QStringLiteral("dark") : property("theme").toString();
+        const QString next = (current == QStringLiteral("dark")) ? QStringLiteral("light") : QStringLiteral("dark");
+        setProperty("theme", next);
+        qApp->setProperty("theme", next);
+        const bool light = (next == QStringLiteral("light"));
+        const QColor base = light ? QColor(30, 31, 33, 220) : QColor(220, 223, 228, 220);
+        const QColor hover = light ? QColor(10, 10, 12, 255) : QColor(255, 255, 255, 230);
+        const QColor press = light ? QColor(0, 0, 0, 200) : QColor(255, 255, 255, 200);
+        const QString iconPath = light ? QStringLiteral(":/svg/sun.svg") : QStringLiteral(":/svg/moon.svg");
+
+        for (auto *btn : findChildren<AnimatedIconButton*>()) {
+            btn->setBaseColor(base);
+            btn->setHoverColor(hover);
+            btn->setPressColor(press);
+            if (btn->objectName() == QStringLiteral("title_theme_btn")) {
+                btn->setSvgIcon(iconPath);
+            }
+        }
+        style()->unpolish(this);
+        style()->polish(this);
+        update();
+    });
+
+    setProperty("theme", QStringLiteral("dark"));
 }
 
 QString LoginDialog::username() const

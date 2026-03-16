@@ -6,7 +6,7 @@
 #include <QDebug>
 
 ChatServer::ChatServer(QObject *parent) : QTcpServer(parent) {
-    clientTaskMap = new QMap<QString, QPointer<ChatTask>>();
+    clientTaskMap = new QHash<QString, QPointer<ChatTask>>();
 
     int workerCount = QThread::idealThreadCount();
     if (workerCount <= 0) workerCount = 4;

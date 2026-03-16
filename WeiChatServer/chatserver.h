@@ -27,7 +27,7 @@ private:
     WorkerThread* leastLoadedWorker() const;
 
 private:
-    QMap<QString, QPointer<ChatTask>> *clientTaskMap;
+    QHash<QString, QPointer<ChatTask>> *clientTaskMap;
     QReadWriteLock mapLock;
     QVector<WorkerThread*> m_workers;
 };

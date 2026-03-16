@@ -12,14 +12,8 @@
   </property>
   <property name="minimumSize">
    <size>
-    <width>1138</width>
-    <height>799</height>
-   </size>
-  </property>
-  <property name="maximumSize">
-   <size>
-    <width>1138</width>
-    <height>799</height>
+    <width>1000</width>
+    <height>720</height>
    </size>
   </property>
   <property name="windowTitle">
@@ -410,7 +404,7 @@
           </spacer>
          </item>
          <item>
-          <widget class="QPushButton" name="pushButton">
+         <widget class="QPushButton" name="pushButton">
            <property name="sizePolicy">
             <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
              <horstretch>0</horstretch>
@@ -428,11 +422,6 @@
              <width>30</width>
              <height>30</height>
             </size>
-           </property>
-           <property name="styleSheet">
-            <string notr="true">QPushButton{border-image:url(:/png/grey_209.png)}
-QPushButton:hover{border-image: url(:/png/grey_226.png)}
-QPushButton:pressed{border-image: url(:/png/grey_209.png)}</string>
            </property>
            <property name="text">
             <string/>

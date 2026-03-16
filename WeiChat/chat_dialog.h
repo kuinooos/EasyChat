@@ -11,6 +11,7 @@
 class QPushButton;
 class QListWidgetItem;
 class QCloseEvent;
+class AnimatedIconButton;
 
 namespace Ui {
 class Chat_Dialog;
@@ -32,6 +33,7 @@ protected:
 private:
     Ui::Chat_Dialog *ui;
     bool _b_loading;
+    class AnimatedIconButton *m_fileButton = nullptr;
 
     QString username;
     ServerConfig serverConfig;
@@ -44,9 +46,13 @@ private:
     void initializeConnection();
     void loadFriendList();
     void addChatUserItem(const QString &name, const QString &head, const QString &msg, bool selectByDefault = false);
+    void addMessageBubble(const QString &sender, const QString &text, bool outgoing);
+    void addSystemBubble(const QString &text);
     QString sendFriendCommand(const QString &command);
     void updateCurrentPeer(const QString &peerName);
     void notifyOffline();
+    void animateListItem(QWidget *widget);
+    void setupIconButtons();
 
     // 发送文件状态
     QFile m_sendFile;

@@ -1,10 +1,14 @@
 #include "chat_dialog.h"
 #include "ui_chat_dialog.h"
+#include "animatediconbutton.h"
+#include "chatbubble.h"
 #include<QRandomGenerator>
 
 #include<QAction>
+#include<QAbstractItemView>
 #include<QCloseEvent>
 #include<QIcon>
+#include<QHBoxLayout>
 #include<QLineEdit>
 #include<QListWidgetItem>
 #include<QMessageBox>
@@ -12,6 +16,11 @@
 #include<QTextEdit>
 #include<QTcpSocket>
 #include<QStringList>
+#include<QVBoxLayout>
+#include<QGraphicsOpacityEffect>
+#include<QGraphicsDropShadowEffect>
+#include<QPropertyAnimation>
+#include<QTimer>
 #include<vector>
 #include<chatuserwid.h>
 #include<QFileDialog>
@@ -27,44 +36,79 @@ Chat_Dialog::Chat_Dialog(const QString &username, const ServerConfig &serverConf
     , socket(new QTcpSocket(this))
 {
     ui->setupUi(this);
+    setObjectName("app_root");
+    setAttribute(Qt::WA_StyledBackground, true);
+    setupIconButtons();
     QAction *searchAction = new QAction(ui->search_edit);
-    searchAction->setIcon(QIcon(":/res/search.png"));
+    searchAction->setIcon(QIcon(":/svg/search.svg"));
     ui->search_edit->addAction(searchAction,QLineEdit::LeadingPosition);
     ui->search_edit->setPlaceholderText(QStringLiteral("搜索"));
     // 创建一个清除动作并设置图标
     QAction *clearAction = new QAction(ui->search_edit);
-    clearAction->setIcon(QIcon(":/res/close_transparent.png"));
+    clearAction->setIcon(QIcon(":/svg/close.svg"));
     // 初始时不显示清除图标
     // 将清除动作添加到LineEdit的末尾位置
     ui->search_edit->addAction(clearAction, QLineEdit::TrailingPosition);
     // 当需要显示清除图标时，更改为实际的清除图标
     connect(ui->search_edit, &QLineEdit::textChanged, [clearAction](const QString &text) {
         if (!text.isEmpty()) {
-            clearAction->setIcon(QIcon(":/res/close_search.png"));
+            clearAction->setIcon(QIcon(":/svg/close.svg"));
         } else {
-            clearAction->setIcon(QIcon(":/res/close_transparent.png")); // 文本为空时，切换回透明图标
+            clearAction->setIcon(QIcon(":/svg/close.svg")); // 文本为空时，切换回透明图标
         }
     });
     // 连接清除动作的触发信号到槽函数，用于清除文本
     connect(clearAction, &QAction::triggered, [this, clearAction]() {
         ui->search_edit->clear();
-        clearAction->setIcon(QIcon(":/res/close_transparent.png")); // 清除文本后，切换回透明图标
+        clearAction->setIcon(QIcon(":/svg/close.svg")); // 清除文本后，切换回透明图标
         ui->search_edit->clearFocus();
         //清除按钮被按下则不显示搜索框
         //ShowSearch(false);
     });
     ui->search_edit->SetMaxLength(15);
+    ui->listWidget->setSpacing(6);
+    ui->chat_user_list->setSpacing(6);
+    ui->listWidget->setSelectionMode(QAbstractItemView::NoSelection);
+    ui->listWidget->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+
+    if (ui->chat_data_list && !ui->chat_data_list->layout()) {
+        auto *layout = new QVBoxLayout(ui->chat_data_list);
+        layout->setContentsMargins(16, 8, 16, 8);
+        layout->setSpacing(8);
+        layout->addWidget(ui->title_wid);
+        layout->addWidget(ui->listWidget);
+    }
+
+    if (ui->chat_user_wid) {
+        ui->chat_user_wid->setAttribute(Qt::WA_StyledBackground, true);
+        auto *shadow = new QGraphicsDropShadowEffect(ui->chat_user_wid);
+        shadow->setBlurRadius(24);
+        shadow->setOffset(0, 6);
+        shadow->setColor(QColor(0, 0, 0, 120));
+        ui->chat_user_wid->setGraphicsEffect(shadow);
+    }
+    if (ui->chat_data_wid) {
+        ui->chat_data_wid->setAttribute(Qt::WA_StyledBackground, true);
+        auto *shadow = new QGraphicsDropShadowEffect(ui->chat_data_wid);
+        shadow->setBlurRadius(28);
+        shadow->setOffset(0, 6);
+        shadow->setColor(QColor(0, 0, 0, 120));
+        ui->chat_data_wid->setGraphicsEffect(shadow);
+    }
 
 //    connect(ui->chat_user_list,&ChatUserList::sig_loading_chat_user,this,&Chat_Dialog::slot_loading_chat_user);//gaidon
     connect(ui->chat_user_list, &QListWidget::itemClicked, this, &Chat_Dialog::onChatUserItemClicked);
-    connect(ui->pushButton, &QPushButton::clicked, this, &Chat_Dialog::onAddFriendClicked);
-    ui->pushButton->setToolTip(QStringLiteral("添加好友"));
+    if (auto *btn = findChild<AnimatedIconButton *>("add_friend_btn")) {
+        connect(btn, &QPushButton::clicked, this, &Chat_Dialog::onAddFriendClicked);
+        btn->setToolTip(QStringLiteral("添加好友"));
+    }
 
     addChatUSerList();
     initializeConnection();
 
-    ui->file_lb->installEventFilter(this);
-    ui->file_lb->setCursor(Qt::PointingHandCursor);
+    if (m_fileButton) {
+        connect(m_fileButton, &QPushButton::clicked, this, &Chat_Dialog::onFileClicked);
+    }
 }
 
 Chat_Dialog::~Chat_Dialog()
@@ -74,6 +118,31 @@ Chat_Dialog::~Chat_Dialog()
             socket->disconnectFromHost();
         }
     delete ui;
+}
+
+void Chat_Dialog::setupIconButtons()
+{
+    auto replaceWithAnimated = [this](QWidget *oldWidget, const QString &objectName,
+                                     const QString &iconPath, const QString &tooltip, int size) -> AnimatedIconButton * {
+        if (!oldWidget) return nullptr;
+        auto *btn = new AnimatedIconButton(oldWidget->parentWidget());
+        btn->setObjectName(objectName);
+        btn->setSvgIcon(iconPath);
+        btn->setFixedSize(size, size);
+        btn->setToolTip(tooltip);
+        if (auto *layout = oldWidget->parentWidget()->layout()) {
+            layout->replaceWidget(oldWidget, btn);
+        }
+        oldWidget->deleteLater();
+        return btn;
+    };
+
+    replaceWithAnimated(ui->pushButton, "add_friend_btn", ":/svg/add.svg", QStringLiteral("添加好友"), 30);
+    if (auto *sendBtn = replaceWithAnimated(ui->send_btn, "send_btn", ":/svg/send.svg", QStringLiteral("发送"), 36)) {
+        connect(sendBtn, &QPushButton::clicked, this, &Chat_Dialog::on_send_btn_clicked);
+    }
+
+    m_fileButton = replaceWithAnimated(ui->file_lb, "file_btn", ":/svg/attach.svg", QStringLiteral("发送文件"), 28);
 }
 
 void Chat_Dialog::closeEvent(QCloseEvent *event)
@@ -117,7 +186,7 @@ void Chat_Dialog::initializeConnection()
     socket->connectToHost(serverConfig.host, serverConfig.chatPort);
     if (!socket->waitForConnected(3000)) {
         if (ui->listWidget) {
-            ui->listWidget->addItem(QStringLiteral("连接聊天服务器失败: ") + socket->errorString());
+            addSystemBubble(QStringLiteral("连接聊天服务器失败: ") + socket->errorString());
         }
         return;
     }
@@ -152,7 +221,7 @@ void Chat_Dialog::loadFriendList()
     if (response == QStringLiteral("__FRIEND_SERVER_ERROR__")) {
         addChatUSerList();
         if (ui->listWidget) {
-            ui->listWidget->addItem(QStringLiteral("好友服务不可用，已加载演示联系人"));
+            addSystemBubble(QStringLiteral("好友服务不可用，已加载演示联系人"));
         }
         return;
     }
@@ -163,7 +232,7 @@ void Chat_Dialog::loadFriendList()
     if (response.isEmpty()) {
         updateCurrentPeer(QString());
         if (ui->listWidget) {
-            ui->listWidget->addItem(QStringLiteral("当前账号暂无好友"));
+            addSystemBubble(QStringLiteral("当前账号暂无好友"));
         }
         return;
     }
@@ -236,6 +305,7 @@ void Chat_Dialog::addChatUserItem(const QString &name, const QString &head, cons
 {
     auto *chat_user_wid = new ChatUserWid();
     chat_user_wid->SetInfo(name, head, msg);
+    chat_user_wid->setSelected(selectByDefault);
     QListWidgetItem *item = new QListWidgetItem;
     item->setSizeHint(chat_user_wid->sizeHint());
     ui->chat_user_list->addItem(item);
@@ -243,8 +313,59 @@ void Chat_Dialog::addChatUserItem(const QString &name, const QString &head, cons
 
     if (selectByDefault) {
         ui->chat_user_list->setCurrentItem(item);
+        chat_user_wid->setSelected(true);
         updateCurrentPeer(chat_user_wid->userName());
     }
+}
+
+void Chat_Dialog::addMessageBubble(const QString &sender, const QString &text, bool outgoing)
+{
+    auto *container = new QWidget;
+    auto *layout = new QHBoxLayout(container);
+    layout->setContentsMargins(8, 4, 8, 4);
+    layout->setSpacing(0);
+
+    auto *bubble = new ChatBubble(outgoing ? ChatBubble::Outgoing : ChatBubble::Incoming, sender, text);
+    bubble->setMaximumWidth(420);
+    bubble->setAttribute(Qt::WA_StyledBackground, true);
+
+    if (outgoing) {
+        layout->addStretch();
+        layout->addWidget(bubble);
+    } else {
+        layout->addWidget(bubble);
+        layout->addStretch();
+    }
+
+    auto *item = new QListWidgetItem(ui->listWidget);
+    container->adjustSize();
+    item->setSizeHint(container->sizeHint());
+    ui->listWidget->addItem(item);
+    ui->listWidget->setItemWidget(item, container);
+    animateListItem(container);
+    ui->listWidget->scrollToBottom();
+}
+
+void Chat_Dialog::addSystemBubble(const QString &text)
+{
+    auto *container = new QWidget;
+    auto *layout = new QHBoxLayout(container);
+    layout->setContentsMargins(8, 4, 8, 4);
+    layout->setSpacing(0);
+
+    auto *bubble = new ChatBubble(ChatBubble::System, QString(), text);
+    bubble->setMaximumWidth(480);
+    layout->addStretch();
+    layout->addWidget(bubble);
+    layout->addStretch();
+
+    auto *item = new QListWidgetItem(ui->listWidget);
+    container->adjustSize();
+    item->setSizeHint(container->sizeHint());
+    ui->listWidget->addItem(item);
+    ui->listWidget->setItemWidget(item, container);
+    animateListItem(container);
+    ui->listWidget->scrollToBottom();
 }
 
 void Chat_Dialog::updateCurrentPeer(const QString &peerName)
@@ -260,6 +381,12 @@ void Chat_Dialog::onChatUserItemClicked(QListWidgetItem *item)
     auto *chatUser = qobject_cast<ChatUserWid*>(ui->chat_user_list->itemWidget(item));
     if (!chatUser) {
         return;
+    }
+    for (int i = 0; i < ui->chat_user_list->count(); ++i) {
+        auto *iterItem = ui->chat_user_list->item(i);
+        if (auto *wid = qobject_cast<ChatUserWid*>(ui->chat_user_list->itemWidget(iterItem))) {
+            wid->setSelected(iterItem == item);
+        }
     }
     updateCurrentPeer(chatUser->userName());
 }
@@ -307,7 +434,7 @@ void Chat_Dialog::on_send_btn_clicked()
     if (socket->isOpen() && !Send_data.isEmpty()) {
            QByteArray data = (username + QStringLiteral("::") + currentPeer + QStringLiteral("::") + Send_data).toUtf8();
            socket->write(data + '\n');  // 添加换行符便于服务器解析
-           ui->listWidget->addItem(QStringLiteral("Me -> ") + currentPeer + QStringLiteral(": ") + Send_data);
+           addMessageBubble(QString(), Send_data, true);
            ui->chat_edit->clear();
            Send_data.clear();
        }
@@ -341,7 +468,7 @@ void Chat_Dialog::processPendingData()
             if (parts.size() >= 3) {
                 const QString sender = parts.value(1);
                 const QString content = parts.mid(2).join(QStringLiteral("::"));
-                ui->listWidget->addItem(sender + QStringLiteral(": ") + content);
+                addMessageBubble(sender, content, false);
             }
         } else if (message.startsWith(QStringLiteral("FILE::"))) {
             const QStringList parts = message.split(QStringLiteral("::"));
@@ -370,13 +497,14 @@ void Chat_Dialog::processPendingData()
                 item->setSizeHint(m_currentRecvFileWid->sizeHint());
                 ui->listWidget->addItem(item);
                 ui->listWidget->setItemWidget(item, m_currentRecvFileWid);
+                animateListItem(m_currentRecvFileWid);
                 
                 connect(m_currentRecvFileWid, &ChatFileWid::sig_downloadClicked, this, &Chat_Dialog::onDownloadClicked);
 
                 if (!m_recvBuf.isEmpty()) consumeFileBytes();
             }
         } else {
-            ui->listWidget->addItem(message);
+            addSystemBubble(message);
         }
     }
 }
@@ -437,12 +565,37 @@ void Chat_Dialog::resetIncomingFileState()
     m_currentRecvFileWid = nullptr;
 }
 
+void Chat_Dialog::animateListItem(QWidget *widget)
+{
+    if (!widget) return;
+    QTimer::singleShot(0, widget, [widget]() {
+        auto *effect = new QGraphicsOpacityEffect(widget);
+        widget->setGraphicsEffect(effect);
+        effect->setOpacity(0.0);
+
+        const QPoint endPos = widget->pos();
+        const QPoint startPos = endPos + QPoint(0, 12);
+        widget->move(startPos);
+
+        auto *opacityAnim = new QPropertyAnimation(effect, "opacity", widget);
+        opacityAnim->setDuration(220);
+        opacityAnim->setStartValue(0.0);
+        opacityAnim->setEndValue(1.0);
+        opacityAnim->setEasingCurve(QEasingCurve::OutCubic);
+
+        auto *moveAnim = new QPropertyAnimation(widget, "pos", widget);
+        moveAnim->setDuration(220);
+        moveAnim->setStartValue(startPos);
+        moveAnim->setEndValue(endPos);
+        moveAnim->setEasingCurve(QEasingCurve::OutCubic);
+
+        opacityAnim->start(QAbstractAnimation::DeleteWhenStopped);
+        moveAnim->start(QAbstractAnimation::DeleteWhenStopped);
+    });
+}
+
 bool Chat_Dialog::eventFilter(QObject *watched, QEvent *event)
 {
-    if (watched == ui->file_lb && event->type() == QEvent::MouseButtonPress) {
-        onFileClicked();
-        return true;
-    }
     return QDialog::eventFilter(watched, event);
 }
 
@@ -486,6 +639,7 @@ void Chat_Dialog::onFileClicked()
     item->setSizeHint(m_currentSendFileWid->sizeHint());
     ui->listWidget->addItem(item);
     ui->listWidget->setItemWidget(item, m_currentSendFileWid);
+    animateListItem(m_currentSendFileWid);
 
     sendNextChunk();
 }
@@ -547,5 +701,5 @@ void Chat_Dialog::onDownloadClicked(const QString &fileName, qint64 fileSize, co
 void Chat_Dialog::on_disconnected()
 {
     qDebug() << "Disconnected from server!";
-    ui->listWidget->addItem("Disconnected from server!");
+    addSystemBubble(QStringLiteral("与服务器断开连接"));
 }

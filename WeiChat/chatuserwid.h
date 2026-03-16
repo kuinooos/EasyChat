@@ -15,6 +15,7 @@ public:
         return QSize(250, 70); // 返回自定义的尺寸
     }
     void SetInfo(QString name, QString head, QString msg);
+    void setSelected(bool selected);
     QString userName() const;
 private:
     Ui::ChatUserWid *ui;

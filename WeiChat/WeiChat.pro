@@ -1,5 +1,6 @@
 QT += core gui
 QT += network
+QT += svg
 
 greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 
@@ -11,6 +12,7 @@ RC_ICONS='weichat.ico'
 
 SOURCES += \
     chat_dialog.cpp \
+    chatbubble.cpp \
     chatuserlist.cpp \
     chatuserwid.cpp \
     customizeedit.cpp \
@@ -21,10 +23,13 @@ SOURCES += \
     main.cpp \
     mainwindow.cpp \
     server_config.cpp \
-    chatfilewid.cpp
+    chatfilewid.cpp \
+    animatediconbutton.cpp \
+    titlebar.cpp
 
 HEADERS += \
     chat_dialog.h \
+    chatbubble.h \
     chatuserlist.h \
     chatuserwid.h \
     customizeedit.h \
@@ -34,7 +39,9 @@ HEADERS += \
     loadingdlg.h \
     mainwindow.h \
     server_config.h \
-    chatfilewid.h
+    chatfilewid.h \
+    animatediconbutton.h \
+    titlebar.h
 
 FORMS += \
     chat_dialog.ui \

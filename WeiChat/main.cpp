@@ -5,6 +5,7 @@
 #include<QFile>
 int main(int argc, char *argv[])
 {
+    QApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
     QApplication a(argc, argv);
 
     //用qss对界面进行修饰
