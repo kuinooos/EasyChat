@@ -144,7 +144,10 @@ void AnimatedIconButton::paintEvent(QPaintEvent *event)
     p.setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform, true);
 
     QRectF r = rect();
-    QColor bg = mixColor(QColor(255, 255, 255, 20), QColor(255, 255, 255, 60), m_hoverProgress);
+    const bool darkIcon = m_baseColor.lightness() < 128;
+    const QColor idleBg = darkIcon ? QColor(0, 0, 0, 12) : QColor(255, 255, 255, 20);
+    const QColor hoverBg = darkIcon ? QColor(0, 0, 0, 26) : QColor(255, 255, 255, 60);
+    QColor bg = mixColor(idleBg, hoverBg, m_hoverProgress);
     p.setPen(Qt::NoPen);
     p.setBrush(bg);
     p.drawRoundedRect(r.adjusted(1, 1, -1, -1), m_cornerRadius, m_cornerRadius);

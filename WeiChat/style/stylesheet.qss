@@ -1,6 +1,6 @@
 * {
-    font-family: "Inter", "Microsoft YaHei UI", sans-serif;
-    font-size: 14px;
+    font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+    font-size: 15px;
     color: #E6E8EB;
 }
 
@@ -21,7 +21,12 @@ QMainWindow, QDialog {
     color: #F0F2F6;
     font-weight: 600;
     letter-spacing: 0.2px;
-    font-size: 15px;
+    font-size: 17px;
+}
+
+#login_heading {
+    font-size: 20px;
+    font-weight: 700;
 }
 
 #side_bar {
@@ -38,11 +43,29 @@ QMainWindow, QDialog {
     background: rgba(18, 19, 20, 0.94);
 }
 
+#chat_data_wid {
+    border-radius: 20px;
+}
+
 #chat_data_list,
 #funct_wid,
 #send_wid,
 #search_wid {
     background: transparent;
+}
+
+#title_wid {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+#funct_wid,
+#send_wid {
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+#label {
+    font-size: 16px;
+    font-weight: 600;
 }
 
 QPushButton {
@@ -58,6 +81,7 @@ QLineEdit, QTextEdit {
     border-radius: 16px;
     padding: 10px 14px;
     selection-background-color: rgba(63, 81, 181, 0.6);
+    font-size: 15px;
 }
 
 QLineEdit:focus, QTextEdit:focus {
@@ -72,6 +96,22 @@ QTextEdit {
 QListWidget {
     background: transparent;
     border: none;
+}
+
+#modern_message_view {
+    background: transparent;
+    border: none;
+    padding: 10px 8px;
+}
+
+#modern_message_view QScrollBar:vertical {
+    width: 8px;
+    margin: 8px 0 8px 0;
+}
+
+#modern_message_view QScrollBar::handle:vertical {
+    background: rgba(255, 255, 255, 0.32);
+    border-radius: 4px;
 }
 
 QListWidget::item {
@@ -89,6 +129,31 @@ QListWidget::item {
 
 #chat_user_item #user_name_lb {
     font-weight: 600;
+    font-size: 15px;
+}
+
+#chat_user_item #user_chat_lb {
+    font-size: 14px;
+    color: rgba(230, 232, 235, 0.78);
+}
+
+#status_wid {
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 12px;
+}
+
+#status_wid[online="true"] {
+    background: rgba(46, 204, 113, 0.2);
+}
+
+#status_wid[online="false"] {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+#chat_user_item #user_status_lb {
+    font-size: 13px;
+    font-weight: 600;
+    color: #D6D8DB;
 }
 
 #chat_user_item:hover {
@@ -100,28 +165,40 @@ QListWidget::item {
 }
 
 #chat_bubble_container[ bubbleType="incoming" ] {
-    background: rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.18);
     border-radius: 16px;
 }
 
 #chat_bubble_container[ bubbleType="outgoing" ] {
-    background: rgba(63, 81, 181, 0.34);
+    background: rgba(63, 81, 181, 0.72);
     border-radius: 16px;
 }
 
 #chat_bubble_container[ bubbleType="system" ] {
-    background: rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.16);
     border-radius: 16px;
 }
 
 #chat_bubble_sender {
-    font-size: 12px;
-    color: rgba(255, 255, 255, 0.7);
+    font-size: 13px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.9);
 }
 
 #chat_bubble_text {
+    font-size: 15px;
+    font-weight: 500;
+    color: #FFFFFF;
+}
+
+#chat_avatar {
+    border-radius: 18px;
+    background: transparent;
+}
+
+#status_label {
+    color: #ff7f7f;
     font-size: 14px;
-    color: #F3F5F7;
 }
 
 QProgressBar {
@@ -162,7 +239,30 @@ QToolTip {
     padding: 6px 8px;
 }
 
+QMessageBox {
+    background: #FFFFFF;
+}
+
+QMessageBox QLabel {
+    color: #111214;
+    font-size: 14px;
+}
+
+QMessageBox QPushButton {
+    color: #111214;
+    background: #EEF1F5;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    border-radius: 10px;
+    padding: 6px 12px;
+}
+
 /* Light theme overrides */
+#app_root[theme="light"],
+QMainWindow[theme="light"],
+QDialog[theme="light"] {
+    background: #F5F6F8;
+}
+
 #app_root[theme="light"] {
     background: #F5F6F8;
 }
@@ -188,6 +288,30 @@ QToolTip {
 
 #app_root[theme="light"] #chat_data_wid {
     background: #F9FAFB;
+}
+
+#app_root[theme="light"] #modern_message_view {
+    background: transparent;
+}
+
+#app_root[theme="light"] #modern_message_view QScrollBar::handle:vertical {
+    background: rgba(17, 18, 20, 0.26);
+}
+
+#app_root[theme="light"] #chat_edit {
+    background: #FFFFFF;
+    border: 1px solid rgba(0, 0, 0, 0.12);
+    border-radius: 16px;
+    padding: 10px;
+}
+
+#app_root[theme="light"] #title_wid {
+    border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+#app_root[theme="light"] #funct_wid,
+#app_root[theme="light"] #send_wid {
+    border-top: 1px solid rgba(0, 0, 0, 0.08);
 }
 
 #app_root[theme="light"] QLineEdit,
@@ -216,6 +340,26 @@ QToolTip {
     color: #111214;
 }
 
+#app_root[theme="light"] #chat_user_item #user_chat_lb {
+    color: rgba(17, 18, 20, 0.72);
+}
+
+#app_root[theme="light"] #status_wid {
+    background: rgba(0, 0, 0, 0.06);
+}
+
+#app_root[theme="light"] #status_wid[online="true"] {
+    background: rgba(38, 181, 107, 0.18);
+}
+
+#app_root[theme="light"] #status_wid[online="false"] {
+    background: rgba(17, 18, 20, 0.08);
+}
+
+#app_root[theme="light"] #chat_user_item #user_status_lb {
+    color: #111214;
+}
+
 #app_root[theme="light"] #chat_user_item:hover {
     background: rgba(0, 0, 0, 0.1);
 }
@@ -229,7 +373,7 @@ QToolTip {
 }
 
 #app_root[theme="light"] #chat_bubble_container[ bubbleType="outgoing" ] {
-    background: rgba(63, 81, 181, 0.22);
+    background: rgba(63, 81, 181, 0.26);
 }
 
 #app_root[theme="light"] #chat_bubble_container[ bubbleType="system" ] {
@@ -237,7 +381,7 @@ QToolTip {
 }
 
 #app_root[theme="light"] #chat_bubble_sender {
-    color: rgba(17, 18, 20, 0.6);
+    color: rgba(17, 18, 20, 0.82);
 }
 
 #app_root[theme="light"] #chat_bubble_text {
@@ -256,4 +400,12 @@ QToolTip {
     background: #FFFFFF;
     color: #111214;
     border: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+#app_root[theme="light"] QScrollBar::handle:vertical {
+    background: rgba(17, 18, 20, 0.22);
+}
+
+#app_root[theme="light"] #status_label {
+    color: #b73c3c;
 }

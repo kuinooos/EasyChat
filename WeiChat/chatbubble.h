@@ -13,6 +13,7 @@ public:
     explicit ChatBubble(BubbleType type, const QString &sender, const QString &text, QWidget *parent = nullptr);
 
     BubbleType bubbleType() const;
+    void setContentMaxWidth(int maxWidth);
 
 private:
     BubbleType m_type;

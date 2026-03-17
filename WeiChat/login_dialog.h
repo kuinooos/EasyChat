@@ -24,6 +24,7 @@ private slots:
     void attemptLogin();
 
 private:
+    void applyTheme(const QString &theme);
     quint16 readPort(QLineEdit *edit, quint16 fallback) const;
 
     QLineEdit *usernameEdit;

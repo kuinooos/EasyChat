@@ -15,6 +15,43 @@
 #include <QApplication>
 #include <QStyle>
 
+namespace {
+
+struct ButtonThemeColors {
+    QColor base;
+    QColor hover;
+    QColor press;
+    QString themeIconPath;
+};
+
+ButtonThemeColors buttonThemeColors(const QString &theme)
+{
+    const bool light = (theme == QStringLiteral("light"));
+    return {
+        light ? QColor(30, 31, 33, 220) : QColor(220, 223, 228, 220),
+        light ? QColor(10, 10, 12, 255) : QColor(255, 255, 255, 230),
+        light ? QColor(0, 0, 0, 200) : QColor(255, 255, 255, 200),
+        light ? QStringLiteral(":/svg/sun.svg") : QStringLiteral(":/svg/moon.svg")
+    };
+}
+
+void repolishRecursively(QWidget *root)
+{
+    if (!root) {
+        return;
+    }
+
+    QList<QWidget *> widgets = root->findChildren<QWidget *>();
+    widgets.prepend(root);
+    for (QWidget *widget : widgets) {
+        widget->style()->unpolish(widget);
+        widget->style()->polish(widget);
+        widget->update();
+    }
+}
+
+}
+
 LoginDialog::LoginDialog(QWidget *parent)
     : QDialog(parent)
     , currentConfig(ServerConfig::load())
@@ -36,8 +73,9 @@ LoginDialog::LoginDialog(QWidget *parent)
     }
 
     auto *titleLabel = new QLabel(QStringLiteral("请输入账号信息"), this);
+    titleLabel->setObjectName(QStringLiteral("login_heading"));
     QFont titleFont = titleLabel->font();
-    titleFont.setPointSize(16);
+    titleFont.setPointSize(18);
     titleFont.setBold(true);
     titleLabel->setFont(titleFont);
     auto *formLayout = new QFormLayout();
@@ -51,6 +89,7 @@ LoginDialog::LoginDialog(QWidget *parent)
     friendPortEdit = new QLineEdit(QString::number(currentConfig.friendPort), this);
     offlinePortEdit = new QLineEdit(QString::number(currentConfig.offlinePort), this);
     statusLabel = new QLabel(this);
+    statusLabel->setObjectName(QStringLiteral("status_label"));
     loginButton = new AnimatedIconButton(this);
     loginButton->setObjectName("login_btn");
     static_cast<AnimatedIconButton *>(loginButton)->setSvgIcon(":/svg/send.svg");
@@ -69,12 +108,10 @@ LoginDialog::LoginDialog(QWidget *parent)
     chatPortEdit->setValidator(new QIntValidator(1, 65535, chatPortEdit));
     friendPortEdit->setValidator(new QIntValidator(1, 65535, friendPortEdit));
     offlinePortEdit->setValidator(new QIntValidator(1, 65535, offlinePortEdit));
-    statusLabel->setStyleSheet(QStringLiteral("color:#c0392b;"));
-
     QFont labelFont = font();
-    labelFont.setPointSize(13);
+    labelFont.setPointSize(14);
     QFont inputFont = font();
-    inputFont.setPointSize(14);
+    inputFont.setPointSize(15);
     usernameEdit->setFont(inputFont);
     passwordEdit->setFont(inputFont);
     hostEdit->setFont(inputFont);
@@ -120,28 +157,28 @@ LoginDialog::LoginDialog(QWidget *parent)
     connect(titleBar, &TitleBar::sigToggleTheme, this, [this]() {
         const QString current = property("theme").toString().isEmpty() ? QStringLiteral("dark") : property("theme").toString();
         const QString next = (current == QStringLiteral("dark")) ? QStringLiteral("light") : QStringLiteral("dark");
-        setProperty("theme", next);
-        qApp->setProperty("theme", next);
-        const bool light = (next == QStringLiteral("light"));
-        const QColor base = light ? QColor(30, 31, 33, 220) : QColor(220, 223, 228, 220);
-        const QColor hover = light ? QColor(10, 10, 12, 255) : QColor(255, 255, 255, 230);
-        const QColor press = light ? QColor(0, 0, 0, 200) : QColor(255, 255, 255, 200);
-        const QString iconPath = light ? QStringLiteral(":/svg/sun.svg") : QStringLiteral(":/svg/moon.svg");
-
-        for (auto *btn : findChildren<AnimatedIconButton*>()) {
-            btn->setBaseColor(base);
-            btn->setHoverColor(hover);
-            btn->setPressColor(press);
-            if (btn->objectName() == QStringLiteral("title_theme_btn")) {
-                btn->setSvgIcon(iconPath);
-            }
-        }
-        style()->unpolish(this);
-        style()->polish(this);
-        update();
+        applyTheme(next);
     });
 
-    setProperty("theme", QStringLiteral("dark"));
+    applyTheme(qApp->property("theme").toString().isEmpty() ? QStringLiteral("dark") : qApp->property("theme").toString());
+}
+
+void LoginDialog::applyTheme(const QString &theme)
+{
+    setProperty("theme", theme);
+    qApp->setProperty("theme", theme);
+
+    const ButtonThemeColors colors = buttonThemeColors(theme);
+    for (auto *btn : findChildren<AnimatedIconButton*>()) {
+        btn->setBaseColor(colors.base);
+        btn->setHoverColor(colors.hover);
+        btn->setPressColor(colors.press);
+        if (btn->objectName() == QStringLiteral("title_theme_btn")) {
+            btn->setSvgIcon(colors.themeIconPath);
+        }
+    }
+
+    repolishRecursively(this);
 }
 
 QString LoginDialog::username() const

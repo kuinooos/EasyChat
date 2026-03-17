@@ -1,23 +1,28 @@
 #include "chat_dialog.h"
 #include "ui_chat_dialog.h"
 #include "animatediconbutton.h"
-#include "chatbubble.h"
+#include "chatmessagedelegate.h"
+#include "chatmessagelistmodel.h"
 #include<QRandomGenerator>
 
 #include<QAction>
 #include<QAbstractItemView>
+#include <QBuffer>
 #include<QCloseEvent>
+#include<QResizeEvent>
+#include <QDesktopServices>
 #include<QIcon>
 #include<QHBoxLayout>
 #include<QLineEdit>
 #include<QListWidgetItem>
+#include<QListView>
 #include<QMessageBox>
 #include<QPushButton>
+#include<QLabel>
+#include<QLayout>
 #include<QTextEdit>
 #include<QTcpSocket>
 #include<QStringList>
-#include<QVBoxLayout>
-#include<QGraphicsOpacityEffect>
 #include<QGraphicsDropShadowEffect>
 #include<QPropertyAnimation>
 #include<QTimer>
@@ -25,9 +30,128 @@
 #include<chatuserwid.h>
 #include<QFileDialog>
 #include<QFileInfo>
+#include <QFutureWatcher>
 #include<QDir>
+#include <QImageReader>
 #include<QMouseEvent>
+#include <QtConcurrent>
 #include<QUuid>
+#include<QStyle>
+#include<QFrame>
+#include<QPainter>
+#include<QSvgRenderer>
+#include<QScrollBar>
+#include <QSet>
+#include<QTextCursor>
+#include <QUrl>
+
+namespace {
+
+struct ButtonThemeColors {
+    QColor base;
+    QColor hover;
+    QColor press;
+    QColor icon;
+    QString themeIconPath;
+};
+
+ButtonThemeColors buttonThemeColors(const QString &theme)
+{
+    const bool light = (theme == QStringLiteral("light"));
+    return {
+        light ? QColor(30, 31, 33, 220) : QColor(220, 223, 228, 220),
+        light ? QColor(10, 10, 12, 255) : QColor(255, 255, 255, 230),
+        light ? QColor(0, 0, 0, 200) : QColor(255, 255, 255, 200),
+        light ? QColor(28, 30, 34) : QColor(228, 231, 236),
+        light ? QStringLiteral(":/svg/sun.svg") : QStringLiteral(":/svg/moon.svg")
+    };
+}
+
+QPixmap renderSvgPixmap(const QString &path, const QSize &size, const QColor &tint)
+{
+    QSvgRenderer renderer(path);
+    if (!renderer.isValid()) {
+        return QPixmap();
+    }
+
+    QImage image(size, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+
+    QPainter painter(&image);
+    renderer.render(&painter);
+    painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+    painter.fillRect(image.rect(), tint);
+    painter.end();
+    return QPixmap::fromImage(image);
+}
+
+QPixmap tintPixmap(const QString &path, const QSize &size, const QColor &tint)
+{
+    QPixmap source(path);
+    if (source.isNull()) {
+        return QPixmap();
+    }
+
+    QPixmap scaled = size.isValid()
+        ? source.scaled(size, Qt::KeepAspectRatio, Qt::SmoothTransformation)
+        : source;
+    QImage image = scaled.toImage().convertToFormat(QImage::Format_ARGB32_Premultiplied);
+
+    QPainter painter(&image);
+    painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+    painter.fillRect(image.rect(), tint);
+    painter.end();
+
+    return QPixmap::fromImage(image);
+}
+
+bool isImagePath(const QString &path)
+{
+    const QString suffix = QFileInfo(path).suffix().toLower();
+    static const QSet<QString> formats = {
+        QStringLiteral("png"), QStringLiteral("jpg"), QStringLiteral("jpeg"),
+        QStringLiteral("bmp"), QStringLiteral("gif"), QStringLiteral("webp")
+    };
+    return formats.contains(suffix);
+}
+
+QByteArray createThumbnailData(const QString &path, const QSize &targetSize = QSize(200, 200))
+{
+    QImageReader reader(path);
+    reader.setAutoTransform(true);
+    const QImage image = reader.read();
+    if (image.isNull()) {
+        return QByteArray();
+    }
+
+    const QImage thumb = image.scaled(targetSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    QByteArray data;
+    QBuffer buffer(&data);
+    if (!buffer.open(QIODevice::WriteOnly)) {
+        return QByteArray();
+    }
+    if (!thumb.save(&buffer, "JPEG", 80)) {
+        return QByteArray();
+    }
+    return data;
+}
+
+void repolishRecursively(QWidget *root)
+{
+    if (!root) {
+        return;
+    }
+
+    QList<QWidget *> widgets = root->findChildren<QWidget *>();
+    widgets.prepend(root);
+    for (QWidget *widget : widgets) {
+        widget->style()->unpolish(widget);
+        widget->style()->polish(widget);
+        widget->update();
+    }
+}
+
+}
 Chat_Dialog::Chat_Dialog(const QString &username, const ServerConfig &serverConfig, QWidget *parent)
     : QDialog(parent)
     , ui(new Ui::Chat_Dialog)
@@ -39,44 +163,36 @@ Chat_Dialog::Chat_Dialog(const QString &username, const ServerConfig &serverConf
     setObjectName("app_root");
     setAttribute(Qt::WA_StyledBackground, true);
     setupIconButtons();
-    QAction *searchAction = new QAction(ui->search_edit);
-    searchAction->setIcon(QIcon(":/svg/search.svg"));
-    ui->search_edit->addAction(searchAction,QLineEdit::LeadingPosition);
+    m_searchAction = new QAction(ui->search_edit);
+    ui->search_edit->addAction(m_searchAction, QLineEdit::LeadingPosition);
     ui->search_edit->setPlaceholderText(QStringLiteral("搜索"));
     // 创建一个清除动作并设置图标
-    QAction *clearAction = new QAction(ui->search_edit);
-    clearAction->setIcon(QIcon(":/svg/close.svg"));
+    m_clearAction = new QAction(ui->search_edit);
     // 初始时不显示清除图标
     // 将清除动作添加到LineEdit的末尾位置
-    ui->search_edit->addAction(clearAction, QLineEdit::TrailingPosition);
+    ui->search_edit->addAction(m_clearAction, QLineEdit::TrailingPosition);
     // 当需要显示清除图标时，更改为实际的清除图标
-    connect(ui->search_edit, &QLineEdit::textChanged, [clearAction](const QString &text) {
-        if (!text.isEmpty()) {
-            clearAction->setIcon(QIcon(":/svg/close.svg"));
-        } else {
-            clearAction->setIcon(QIcon(":/svg/close.svg")); // 文本为空时，切换回透明图标
-        }
+    connect(ui->search_edit, &QLineEdit::textChanged, [this](const QString &) {
+        updateActionIcons();
     });
     // 连接清除动作的触发信号到槽函数，用于清除文本
-    connect(clearAction, &QAction::triggered, [this, clearAction]() {
+    connect(m_clearAction, &QAction::triggered, [this]() {
         ui->search_edit->clear();
-        clearAction->setIcon(QIcon(":/svg/close.svg")); // 清除文本后，切换回透明图标
+        updateActionIcons();
         ui->search_edit->clearFocus();
         //清除按钮被按下则不显示搜索框
         //ShowSearch(false);
     });
     ui->search_edit->SetMaxLength(15);
-    ui->listWidget->setSpacing(6);
     ui->chat_user_list->setSpacing(6);
-    ui->listWidget->setSelectionMode(QAbstractItemView::NoSelection);
-    ui->listWidget->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    setupModernMessageView();
+    initializeStorage();
 
-    if (ui->chat_data_list && !ui->chat_data_list->layout()) {
-        auto *layout = new QVBoxLayout(ui->chat_data_list);
-        layout->setContentsMargins(16, 8, 16, 8);
-        layout->setSpacing(8);
-        layout->addWidget(ui->title_wid);
-        layout->addWidget(ui->listWidget);
+    if (ui->verticalLayout_4) {
+        ui->verticalLayout_4->setStretch(0, 1);
+        ui->verticalLayout_4->setStretch(1, 0);
+        ui->verticalLayout_4->setStretch(2, 0);
+        ui->verticalLayout_4->setStretch(3, 0);
     }
 
     if (ui->chat_user_wid) {
@@ -103,8 +219,26 @@ Chat_Dialog::Chat_Dialog(const QString &username, const ServerConfig &serverConf
         btn->setToolTip(QStringLiteral("添加好友"));
     }
 
+    m_friendRefreshTimer = new QTimer(this);
+    m_friendRefreshTimer->setInterval(5000);
+    connect(m_friendRefreshTimer, &QTimer::timeout, this, &Chat_Dialog::loadFriendList);
+
+    const QList<QLabel *> clickableLabels = {
+        ui->side_connect_lb, ui->side_head_lb, ui->label_2, ui->label_3, ui->side_chat_lb,
+        ui->label_4, ui->label_6, ui->label_5, ui->emo_lb, ui->label_8, ui->label_9, ui->label_7
+    };
+    for (QLabel *label : clickableLabels) {
+        if (!label) {
+            continue;
+        }
+        label->setCursor(Qt::PointingHandCursor);
+        label->installEventFilter(this);
+    }
+
     addChatUSerList();
     initializeConnection();
+
+    applyTheme(qApp->property("theme").toString().isEmpty() ? QStringLiteral("dark") : qApp->property("theme").toString());
 
     if (m_fileButton) {
         connect(m_fileButton, &QPushButton::clicked, this, &Chat_Dialog::onFileClicked);
@@ -113,6 +247,15 @@ Chat_Dialog::Chat_Dialog(const QString &username, const ServerConfig &serverConf
 
 Chat_Dialog::~Chat_Dialog()
 {
+    if (!currentPeer.isEmpty() && ui->chat_edit) {
+        const QString draft = ui->chat_edit->toPlainText();
+        m_draftCache.insert(currentPeer, draft);
+        m_storage.saveDraft(username, currentPeer, draft);
+    }
+
+    qDeleteAll(m_conversationModels);
+    m_conversationModels.clear();
+
     notifyOffline();
     if (socket && socket->isOpen()) {
             socket->disconnectFromHost();
@@ -143,6 +286,66 @@ void Chat_Dialog::setupIconButtons()
     }
 
     m_fileButton = replaceWithAnimated(ui->file_lb, "file_btn", ":/svg/attach.svg", QStringLiteral("发送文件"), 28);
+}
+
+void Chat_Dialog::setupModernMessageView()
+{
+    if (!ui->message_view) {
+        return;
+    }
+
+    m_messageView = ui->message_view;
+    m_messageView->setObjectName(QStringLiteral("modern_message_view"));
+    m_messageView->setFrameShape(QFrame::NoFrame);
+    m_messageView->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_messageView->setSelectionMode(QAbstractItemView::NoSelection);
+    m_messageView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_messageView->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_messageView->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    m_messageView->setSpacing(6);
+    m_messageView->setWordWrap(true);
+    m_messageView->setUniformItemSizes(false);
+
+    m_emptyMessageModel = new ChatMessageListModel(this);
+    m_messageModel = m_emptyMessageModel;
+    m_messageDelegate = new ChatMessageDelegate(this);
+    m_messageView->setModel(m_messageModel);
+    m_messageView->setItemDelegate(m_messageDelegate);
+    connect(m_messageDelegate, &ChatMessageDelegate::downloadRequested, this, &Chat_Dialog::onDownloadClicked);
+    connect(m_messageDelegate, &ChatMessageDelegate::imageRequested, this, &Chat_Dialog::onImageClicked);
+
+    m_messageView->viewport()->installEventFilter(this);
+    connect(m_messageView->verticalScrollBar(), &QScrollBar::rangeChanged, this,
+            [this](int, int) { QTimer::singleShot(0, this, [this]() { refreshMessageListLayout(); }); });
+}
+
+void Chat_Dialog::initializeStorage()
+{
+    if (!m_storage.initialize(username)) {
+        addSystemBubble(QStringLiteral("本地消息存储初始化失败，当前仅临时会话可用"));
+        return;
+    }
+    m_dbPath = m_storage.databasePath();
+}
+
+ChatMessageListModel *Chat_Dialog::loadConversationModel(const QString &peerName)
+{
+    if (peerName.isEmpty()) {
+        return m_emptyMessageModel;
+    }
+
+    auto it = m_conversationModels.find(peerName);
+    if (it != m_conversationModels.end()) {
+        return it.value();
+    }
+
+    auto *model = new ChatMessageListModel(this);
+    const auto messages = m_storage.loadConversation(username, peerName, 2000);
+    for (const auto &msg : messages) {
+        model->appendMessage(msg);
+    }
+    m_conversationModels.insert(peerName, model);
+    return model;
 }
 
 void Chat_Dialog::closeEvent(QCloseEvent *event)
@@ -185,9 +388,7 @@ void Chat_Dialog::initializeConnection()
 
     socket->connectToHost(serverConfig.host, serverConfig.chatPort);
     if (!socket->waitForConnected(3000)) {
-        if (ui->listWidget) {
-            addSystemBubble(QStringLiteral("连接聊天服务器失败: ") + socket->errorString());
-        }
+        addSystemBubble(QStringLiteral("连接聊天服务器失败: ") + socket->errorString());
         return;
     }
 
@@ -196,6 +397,9 @@ void Chat_Dialog::initializeConnection()
     socket->flush();
 
     loadFriendList();
+    if (m_friendRefreshTimer && !m_friendRefreshTimer->isActive()) {
+        m_friendRefreshTimer->start();
+    }
 }
 
 
@@ -211,29 +415,27 @@ void Chat_Dialog::addChatUSerList()
         int str_i = randomValue%strs.size();
         int head_i = randomValue%heads.size();
         int name_i = randomValue%names.size();
-        addChatUserItem(names[name_i], heads[head_i], strs[str_i], i == 0);
+        const bool online = (randomValue % 2) == 0;
+        addChatUserItem(names[name_i], heads[head_i], strs[str_i], online, i == 0);
     }
 }
 
 void Chat_Dialog::loadFriendList()
 {
+    const QString selectedPeer = currentPeer;
     const QString response = sendFriendCommand(QStringLiteral("NOWMYFRIEND::") + username);
     if (response == QStringLiteral("__FRIEND_SERVER_ERROR__")) {
         addChatUSerList();
-        if (ui->listWidget) {
-            addSystemBubble(QStringLiteral("好友服务不可用，已加载演示联系人"));
-        }
+        addSystemBubble(QStringLiteral("好友服务不可用，已加载演示联系人"));
         return;
     }
 
     ui->chat_user_list->clear();
-    currentPeer.clear();
+    bool selectedFound = false;
 
     if (response.isEmpty()) {
         updateCurrentPeer(QString());
-        if (ui->listWidget) {
-            addSystemBubble(QStringLiteral("当前账号暂无好友"));
-        }
+        addSystemBubble(QStringLiteral("当前账号暂无好友"));
         return;
     }
 
@@ -246,16 +448,21 @@ void Chat_Dialog::loadFriendList()
             continue;
         }
 
-        const QString status = fields.value(1).trimmed() == QStringLiteral("1")
-            ? QStringLiteral("在线")
-            : QStringLiteral("离线");
+        const bool online = fields.value(1).trimmed() == QStringLiteral("1");
+        const QString preview = online ? QStringLiteral("当前在线") : QStringLiteral("当前离线");
         const QString head = heads.at(index % static_cast<int>(heads.size()));
-        addChatUserItem(friendName, head, status, index == 0);
+        const bool selectByDefault = selectedPeer.isEmpty() ? (index == 0) : (friendName == selectedPeer);
+        if (selectByDefault) {
+            selectedFound = true;
+        }
+        addChatUserItem(friendName, head, preview, online, selectByDefault);
         ++index;
     }
 
     if (index == 0) {
         addChatUSerList();
+    } else if (!selectedPeer.isEmpty() && !selectedFound) {
+        updateCurrentPeer(QString());
     }
 }
 
@@ -301,10 +508,13 @@ void Chat_Dialog::notifyOffline()
     offlineSocket.disconnectFromHost();
 }
 
-void Chat_Dialog::addChatUserItem(const QString &name, const QString &head, const QString &msg, bool selectByDefault)
+void Chat_Dialog::addChatUserItem(const QString &name, const QString &head, const QString &preview, bool online, bool selectByDefault)
 {
     auto *chat_user_wid = new ChatUserWid();
-    chat_user_wid->SetInfo(name, head, msg);
+    chat_user_wid->SetInfo(name, head, preview, online);
+    if (!name.isEmpty() && !head.isEmpty()) {
+        m_peerAvatar.insert(name, head);
+    }
     chat_user_wid->setSelected(selectByDefault);
     QListWidgetItem *item = new QListWidgetItem;
     item->setSizeHint(chat_user_wid->sizeHint());
@@ -318,61 +528,349 @@ void Chat_Dialog::addChatUserItem(const QString &name, const QString &head, cons
     }
 }
 
-void Chat_Dialog::addMessageBubble(const QString &sender, const QString &text, bool outgoing)
+void Chat_Dialog::applyTheme(const QString &theme)
 {
-    auto *container = new QWidget;
-    auto *layout = new QHBoxLayout(container);
-    layout->setContentsMargins(8, 4, 8, 4);
-    layout->setSpacing(0);
+    m_theme = theme;
+    setProperty("theme", theme);
 
-    auto *bubble = new ChatBubble(outgoing ? ChatBubble::Outgoing : ChatBubble::Incoming, sender, text);
-    bubble->setMaximumWidth(420);
-    bubble->setAttribute(Qt::WA_StyledBackground, true);
-
-    if (outgoing) {
-        layout->addStretch();
-        layout->addWidget(bubble);
-    } else {
-        layout->addWidget(bubble);
-        layout->addStretch();
+    const ButtonThemeColors colors = buttonThemeColors(theme);
+    for (auto *btn : findChildren<AnimatedIconButton*>()) {
+        btn->setBaseColor(colors.base);
+        btn->setHoverColor(colors.hover);
+        btn->setPressColor(colors.press);
     }
 
-    auto *item = new QListWidgetItem(ui->listWidget);
-    container->adjustSize();
-    item->setSizeHint(container->sizeHint());
-    ui->listWidget->addItem(item);
-    ui->listWidget->setItemWidget(item, container);
-    animateListItem(container);
-    ui->listWidget->scrollToBottom();
+    updateActionIcons();
+    updateDecorativeIcons();
+    if (m_messageDelegate) {
+        m_messageDelegate->setTheme(theme);
+    }
+    if (m_messageView) {
+        m_messageView->viewport()->update();
+    }
+    repolishRecursively(this);
 }
 
-void Chat_Dialog::addSystemBubble(const QString &text)
+void Chat_Dialog::updateActionIcons()
 {
-    auto *container = new QWidget;
-    auto *layout = new QHBoxLayout(container);
-    layout->setContentsMargins(8, 4, 8, 4);
-    layout->setSpacing(0);
+    const ButtonThemeColors colors = buttonThemeColors(m_theme);
+    const QSize iconSize(16, 16);
 
-    auto *bubble = new ChatBubble(ChatBubble::System, QString(), text);
-    bubble->setMaximumWidth(480);
-    layout->addStretch();
-    layout->addWidget(bubble);
-    layout->addStretch();
+    if (m_searchAction) {
+        m_searchAction->setIcon(QIcon(renderSvgPixmap(QStringLiteral(":/svg/search.svg"), iconSize, colors.icon)));
+    }
+    if (m_clearAction) {
+        m_clearAction->setIcon(QIcon(renderSvgPixmap(QStringLiteral(":/svg/close.svg"), iconSize, colors.icon)));
+    }
+}
 
-    auto *item = new QListWidgetItem(ui->listWidget);
-    container->adjustSize();
-    item->setSizeHint(container->sizeHint());
-    ui->listWidget->addItem(item);
-    ui->listWidget->setItemWidget(item, container);
-    animateListItem(container);
-    ui->listWidget->scrollToBottom();
+void Chat_Dialog::updateDecorativeIcons()
+{
+    const ButtonThemeColors colors = buttonThemeColors(m_theme);
+
+    if (ui->side_head_lb) {
+        ui->side_head_lb->setPixmap(tintPixmap(QStringLiteral(":/png/left_1.png"), QSize(24, 24), colors.icon));
+    }
+    if (ui->label_2) {
+        ui->label_2->setPixmap(tintPixmap(QStringLiteral(":/png/user.png"), QSize(24, 24), colors.icon));
+    }
+    if (ui->label_3) {
+        ui->label_3->setPixmap(tintPixmap(QStringLiteral(":/png/left_3.png"), QSize(24, 24), colors.icon));
+    }
+    if (ui->side_chat_lb) {
+        ui->side_chat_lb->setPixmap(tintPixmap(QStringLiteral(":/png/friend.png"), QSize(24, 24), colors.icon));
+    }
+    if (ui->label_7) {
+        ui->label_7->setPixmap(renderSvgPixmap(QStringLiteral(":/svg/more.svg"), QSize(18, 18), colors.icon));
+    }
+    if (ui->emo_lb) {
+        ui->emo_lb->setPixmap(renderSvgPixmap(QStringLiteral(":/svg/emoji.svg"), QSize(18, 18), colors.icon));
+    }
+    if (ui->label_8) {
+        ui->label_8->setPixmap(tintPixmap(QStringLiteral(":/png/jietu.png"), QSize(18, 18), colors.icon));
+    }
+    if (ui->label_9) {
+        ui->label_9->setPixmap(tintPixmap(QStringLiteral(":/png/record.png"), QSize(18, 18), colors.icon));
+    }
+}
+
+void Chat_Dialog::addMessageBubble(const QString &sender, const QString &text, bool outgoing, const QDateTime &timestamp)
+{
+    if (!m_messageModel || !m_messageView) {
+        return;
+    }
+
+    ChatMessageListModel::MessageItem item;
+    item.type = ChatMessageListModel::MessageItem::Text;
+    item.sender = sender;
+    item.text = text;
+    item.outgoing = outgoing;
+    item.system = false;
+    item.timestamp = timestamp.isValid() ? timestamp : QDateTime::currentDateTime();
+    m_messageModel->appendMessage(item);
+    scrollMessagesAnimated();
+}
+
+void Chat_Dialog::addSystemBubble(const QString &text, const QDateTime &timestamp)
+{
+    if (!m_messageModel || !m_messageView) {
+        return;
+    }
+
+    ChatMessageListModel::MessageItem item;
+    item.type = ChatMessageListModel::MessageItem::System;
+    item.sender.clear();
+    item.text = text;
+    item.outgoing = false;
+    item.system = true;
+    item.timestamp = timestamp.isValid() ? timestamp : QDateTime::currentDateTime();
+    m_messageModel->appendMessage(item);
+    scrollMessagesAnimated();
+}
+
+void Chat_Dialog::addFileBubble(const QString &sender, const QString &fileName, qint64 fileSize, qint64 progress,
+                                bool outgoing, bool completed, bool downloadable, const QDateTime &timestamp)
+{
+    if (!m_messageModel || !m_messageView) {
+        return;
+    }
+
+    ChatMessageListModel::MessageItem item;
+    item.type = ChatMessageListModel::MessageItem::File;
+    item.sender = sender;
+    item.text = QStringLiteral("文件消息");
+    item.outgoing = outgoing;
+    item.system = false;
+    item.timestamp = timestamp.isValid() ? timestamp : QDateTime::currentDateTime();
+    item.fileName = fileName;
+    item.fileSize = fileSize;
+    item.fileProgress = progress;
+    item.fileCompleted = completed;
+    item.downloadable = downloadable;
+    m_messageModel->appendMessage(item);
+    scrollMessagesAnimated();
+}
+
+qint64 Chat_Dialog::appendPeerMessage(const QString &peerName, const QString &sender, const QString &text,
+                                      bool outgoing, bool system, const QDateTime &timestamp)
+{
+    if (peerName.isEmpty()) {
+        return -1;
+    }
+
+    ChatMessageListModel::MessageItem item;
+    item.type = system ? ChatMessageListModel::MessageItem::System : ChatMessageListModel::MessageItem::Text;
+    item.sender = sender;
+    item.text = text;
+    item.outgoing = outgoing;
+    item.system = system;
+    item.timestamp = timestamp.isValid() ? timestamp : QDateTime::currentDateTime();
+    item.messageId = m_storage.addMessage(username, peerName, item);
+
+    ChatMessageListModel *model = loadConversationModel(peerName);
+    if (model) {
+        model->appendMessage(item);
+    }
+    return item.messageId;
+}
+
+void Chat_Dialog::sendOfflineAck(qint64 offlineId)
+{
+    if (offlineId <= 0 || !socket || socket->state() != QAbstractSocket::ConnectedState) {
+        return;
+    }
+    const QString ack = QStringLiteral("ACK::%1\n").arg(offlineId);
+    socket->write(ack.toUtf8());
+}
+
+qint64 Chat_Dialog::appendPeerFileMessage(const QString &peerName, const QString &sender, const QString &fileName,
+                                          qint64 fileSize, bool outgoing, bool downloadable,
+                                          const QString &localPath, bool isImage, const QByteArray &thumbnailData)
+{
+    if (peerName.isEmpty()) {
+        return -1;
+    }
+
+    ChatMessageListModel::MessageItem item;
+    item.type = ChatMessageListModel::MessageItem::File;
+    item.sender = sender;
+    item.outgoing = outgoing;
+    item.system = false;
+    item.timestamp = QDateTime::currentDateTime();
+    item.fileName = fileName;
+    item.fileSize = fileSize;
+    item.fileProgress = 0;
+    item.fileCompleted = false;
+    item.downloadable = downloadable;
+    item.localPath = localPath;
+    item.isImage = isImage;
+    item.thumbnailData = thumbnailData;
+    if (!thumbnailData.isEmpty()) {
+        item.thumbnailPixmap.loadFromData(thumbnailData);
+    }
+    item.messageId = m_storage.addMessage(username, peerName, item);
+
+    ChatMessageListModel *model = loadConversationModel(peerName);
+    if (model) {
+        model->appendMessage(item);
+    }
+    return item.messageId;
+}
+
+void Chat_Dialog::updatePeerFileProgress(const QString &peerName, qint64 messageId, qint64 progress, bool completed,
+                                         bool downloadable, const QString &localPath)
+{
+    if (peerName.isEmpty() || messageId < 0) {
+        return;
+    }
+
+    ChatMessageListModel *model = loadConversationModel(peerName);
+    if (model) {
+        const int row = model->findRowByMessageId(messageId);
+        if (row >= 0) {
+            auto item = model->messageAt(row);
+            item.fileProgress = progress;
+            item.fileCompleted = completed;
+            item.downloadable = downloadable;
+            if (!localPath.isEmpty()) {
+                item.localPath = localPath;
+            }
+            model->updateMessage(row, item);
+        }
+    }
+
+    m_storage.updateFileProgress(username, peerName, messageId, progress, completed, downloadable, localPath);
+}
+
+void Chat_Dialog::updatePeerImageData(const QString &peerName, qint64 messageId, bool isImage,
+                                      const QByteArray &thumbnailData, const QString &localPath)
+{
+    if (peerName.isEmpty() || messageId < 0) {
+        return;
+    }
+
+    ChatMessageListModel *model = loadConversationModel(peerName);
+    if (model) {
+        const int row = model->findRowByMessageId(messageId);
+        if (row >= 0) {
+            auto item = model->messageAt(row);
+            item.isImage = isImage;
+            item.thumbnailData = thumbnailData;
+            if (!thumbnailData.isEmpty()) {
+                item.thumbnailPixmap.loadFromData(thumbnailData);
+            }
+            if (!localPath.isEmpty()) {
+                item.localPath = localPath;
+            }
+            model->updateMessage(row, item);
+        }
+    }
+
+    m_storage.updateImageData(username, peerName, messageId, isImage, thumbnailData, localPath);
+}
+
+void Chat_Dialog::requestThumbnailGeneration(const QString &peerName, qint64 messageId, const QString &localPath)
+{
+    if (peerName.isEmpty() || messageId < 0 || localPath.isEmpty() || !QFile::exists(localPath)) {
+        return;
+    }
+
+    auto *watcher = new QFutureWatcher<QByteArray>(this);
+    connect(watcher, &QFutureWatcher<QByteArray>::finished, this, [this, watcher, peerName, messageId, localPath]() {
+        const QByteArray thumb = watcher->result();
+        watcher->deleteLater();
+        if (thumb.isEmpty()) {
+            return;
+        }
+        updatePeerImageData(peerName, messageId, true, thumb, localPath);
+    });
+
+    watcher->setFuture(QtConcurrent::run([localPath]() {
+        return createThumbnailData(localPath);
+    }));
+}
+
+void Chat_Dialog::renderConversation(const QString &peerName)
+{
+    if (!m_messageView) {
+        return;
+    }
+    if (peerName.isEmpty()) {
+        m_messageModel = m_emptyMessageModel;
+        m_messageView->setModel(m_messageModel);
+        m_messageView->setItemDelegate(m_messageDelegate);
+        return;
+    }
+
+    ChatMessageListModel *model = loadConversationModel(peerName);
+    if (!model) {
+        return;
+    }
+
+    m_messageModel = model;
+    m_messageView->setModel(m_messageModel);
+    m_messageView->setItemDelegate(m_messageDelegate);
+    m_messageView->scrollToBottom();
+}
+
+void Chat_Dialog::clearCurrentConversation()
+{
+    if (currentPeer.isEmpty()) {
+        return;
+    }
+
+    const auto answer = QMessageBox::question(
+        this,
+        QStringLiteral("清空历史"),
+        QStringLiteral("确定清空与 %1 的历史消息吗？此操作不可撤销。").arg(currentPeer),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (answer != QMessageBox::Yes) {
+        return;
+    }
+
+    if (!m_storage.clearConversation(username, currentPeer)) {
+        QMessageBox::warning(this, QStringLiteral("清空历史"), QStringLiteral("清空失败，请稍后重试"));
+        return;
+    }
+    if (m_conversationModels.contains(currentPeer)) {
+        m_conversationModels[currentPeer]->clear();
+    }
+    m_draftCache.remove(currentPeer);
+    if (ui->chat_edit) {
+        ui->chat_edit->clear();
+    }
 }
 
 void Chat_Dialog::updateCurrentPeer(const QString &peerName)
 {
+    const QString oldPeer = currentPeer;
+    if (!oldPeer.isEmpty() && ui->chat_edit) {
+        const QString oldDraft = ui->chat_edit->toPlainText();
+        m_draftCache.insert(oldPeer, oldDraft);
+        m_storage.saveDraft(username, oldPeer, oldDraft);
+    }
+
+    const bool peerChanged = (currentPeer != peerName);
     currentPeer = peerName;
     if (ui->label) {
         ui->label->setText(peerName.isEmpty() ? QStringLiteral("请选择聊天对象") : peerName);
+    }
+    if (peerChanged) {
+        renderConversation(peerName);
+
+        if (ui->chat_edit) {
+            QString draft = m_draftCache.value(peerName);
+            if (draft.isNull() && !peerName.isEmpty()) {
+                draft = m_storage.loadDraft(username, peerName);
+                m_draftCache.insert(peerName, draft);
+            }
+            ui->chat_edit->blockSignals(true);
+            ui->chat_edit->setPlainText(draft);
+            ui->chat_edit->moveCursor(QTextCursor::End);
+            ui->chat_edit->blockSignals(false);
+            Send_data = draft;
+        }
     }
 }
 
@@ -418,10 +916,12 @@ void Chat_Dialog::onAddFriendClicked()
 void Chat_Dialog::on_chat_edit_textChanged()
 {
     QString currentText = ui->chat_edit->toPlainText();
-
-    qDebug() << "Current Text:" << currentText;
-
     Send_data = currentText;
+
+    if (!currentPeer.isEmpty()) {
+        m_draftCache.insert(currentPeer, currentText);
+        m_storage.saveDraft(username, currentPeer, currentText);
+    }
 }
 
 void Chat_Dialog::on_send_btn_clicked()
@@ -434,7 +934,7 @@ void Chat_Dialog::on_send_btn_clicked()
     if (socket->isOpen() && !Send_data.isEmpty()) {
            QByteArray data = (username + QStringLiteral("::") + currentPeer + QStringLiteral("::") + Send_data).toUtf8();
            socket->write(data + '\n');  // 添加换行符便于服务器解析
-           addMessageBubble(QString(), Send_data, true);
+             appendPeerMessage(currentPeer, username, Send_data, true, false);
            ui->chat_edit->clear();
            Send_data.clear();
        }
@@ -468,7 +968,24 @@ void Chat_Dialog::processPendingData()
             if (parts.size() >= 3) {
                 const QString sender = parts.value(1);
                 const QString content = parts.mid(2).join(QStringLiteral("::"));
-                addMessageBubble(sender, content, false);
+                appendPeerMessage(sender, sender, content, false, false);
+            }
+        } else if (message.startsWith(QStringLiteral("OFFLINE::"))) {
+            const QStringList parts = message.split(QStringLiteral("::"));
+            if (parts.size() >= 5) {
+                bool idOk = false;
+                const qint64 offlineId = parts.value(1).toLongLong(&idOk);
+                const QString sender = parts.value(2);
+                const QByteArray decoded = QByteArray::fromBase64(parts.value(3).toLatin1());
+                const QString content = QString::fromUtf8(decoded);
+                const QDateTime ts = QDateTime::fromString(parts.value(4), QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"));
+
+                if (!sender.isEmpty()) {
+                    appendPeerMessage(sender, sender, content, false, false, ts);
+                    if (idOk) {
+                        sendOfflineAck(offlineId);
+                    }
+                }
             }
         } else if (message.startsWith(QStringLiteral("FILE::"))) {
             const QStringList parts = message.split(QStringLiteral("::"));
@@ -476,6 +993,8 @@ void Chat_Dialog::processPendingData()
                 m_inFileName = parts[1];
                 m_fileExp = parts[2].toLongLong();
                 m_inFileSender = parts[3];
+                m_incomingPeer = m_inFileSender;
+                const bool incomingIsImage = isImagePath(m_inFileName);
 
                 m_fileGot = 0;
                 m_recvFile = m_fileExp > 0;
@@ -491,15 +1010,8 @@ void Chat_Dialog::processPendingData()
                      m_inFile.open(QIODevice::WriteOnly);
                 }
 
-                // 创建气泡控件
-                m_currentRecvFileWid = new ChatFileWid(ChatFileWid::Receiver, m_inFileName, m_fileExp, m_inFileSender);
-                QListWidgetItem *item = new QListWidgetItem(ui->listWidget);
-                item->setSizeHint(m_currentRecvFileWid->sizeHint());
-                ui->listWidget->addItem(item);
-                ui->listWidget->setItemWidget(item, m_currentRecvFileWid);
-                animateListItem(m_currentRecvFileWid);
-                
-                connect(m_currentRecvFileWid, &ChatFileWid::sig_downloadClicked, this, &Chat_Dialog::onDownloadClicked);
+                m_currentRecvMessageId = appendPeerFileMessage(m_incomingPeer, m_inFileSender, m_inFileName, m_fileExp,
+                                                                false, true, m_inFile.fileName(), incomingIsImage);
 
                 if (!m_recvBuf.isEmpty()) consumeFileBytes();
             }
@@ -532,12 +1044,16 @@ bool Chat_Dialog::consumeFileBytes()
     }
 
     m_fileGot += written;
-    if (m_currentRecvFileWid) {
-        m_currentRecvFileWid->updateProgress(m_fileGot, m_fileExp);
-    }
+    updatePeerFileProgress(m_incomingPeer, m_currentRecvMessageId, m_fileGot, false, true, m_inFile.fileName());
 
     if (m_fileGot >= m_fileExp) {
-        if (m_currentRecvFileWid) m_currentRecvFileWid->setCompleted();
+        updatePeerFileProgress(m_incomingPeer, m_currentRecvMessageId, m_fileExp, true, true, m_inFile.fileName());
+        if (isImagePath(m_inFileName)) {
+            requestThumbnailGeneration(m_incomingPeer, m_currentRecvMessageId, m_inFile.fileName());
+        }
+        if (m_incomingPeer == currentPeer) {
+            addSystemBubble(QStringLiteral("文件接收完成：%1").arg(m_inFileName));
+        }
         
         // 如果用户在下载中已经选好了路径，收完立即移动/拷贝过去
         if (!m_targetSavePath.isEmpty()) {
@@ -562,41 +1078,113 @@ void Chat_Dialog::resetIncomingFileState()
     m_fileGot = 0;
     m_inFileName.clear();
     m_inFileSender.clear();
-    m_currentRecvFileWid = nullptr;
+    m_incomingPeer.clear();
+    m_currentRecvMessageId = -1;
 }
 
-void Chat_Dialog::animateListItem(QWidget *widget)
+void Chat_Dialog::animateListItem()
 {
-    if (!widget) return;
-    QTimer::singleShot(0, widget, [widget]() {
-        auto *effect = new QGraphicsOpacityEffect(widget);
-        widget->setGraphicsEffect(effect);
-        effect->setOpacity(0.0);
+    scrollMessagesAnimated();
+}
 
-        const QPoint endPos = widget->pos();
-        const QPoint startPos = endPos + QPoint(0, 12);
-        widget->move(startPos);
+void Chat_Dialog::scrollMessagesAnimated()
+{
+    if (!m_messageView || !m_messageView->verticalScrollBar()) {
+        return;
+    }
 
-        auto *opacityAnim = new QPropertyAnimation(effect, "opacity", widget);
-        opacityAnim->setDuration(220);
-        opacityAnim->setStartValue(0.0);
-        opacityAnim->setEndValue(1.0);
-        opacityAnim->setEasingCurve(QEasingCurve::OutCubic);
+    QScrollBar *bar = m_messageView->verticalScrollBar();
+    const int endValue = bar->maximum();
+    const int startValue = qMax(0, endValue - 42);
 
-        auto *moveAnim = new QPropertyAnimation(widget, "pos", widget);
-        moveAnim->setDuration(220);
-        moveAnim->setStartValue(startPos);
-        moveAnim->setEndValue(endPos);
-        moveAnim->setEasingCurve(QEasingCurve::OutCubic);
+    auto *animation = new QPropertyAnimation(bar, "value", this);
+    animation->setDuration(180);
+    animation->setStartValue(startValue);
+    animation->setEndValue(endValue);
+    animation->setEasingCurve(QEasingCurve::OutCubic);
+    animation->start(QAbstractAnimation::DeleteWhenStopped);
+}
 
-        opacityAnim->start(QAbstractAnimation::DeleteWhenStopped);
-        moveAnim->start(QAbstractAnimation::DeleteWhenStopped);
-    });
+void Chat_Dialog::refreshMessageListLayout()
+{
+    if (!m_messageView) {
+        return;
+    }
+    m_messageView->doItemsLayout();
+    m_messageView->viewport()->update();
+}
+
+void Chat_Dialog::resizeEvent(QResizeEvent *event)
+{
+    QDialog::resizeEvent(event);
+    refreshMessageListLayout();
 }
 
 bool Chat_Dialog::eventFilter(QObject *watched, QEvent *event)
 {
+    if (m_messageView && watched == m_messageView->viewport()) {
+        if (event->type() == QEvent::Resize || event->type() == QEvent::LayoutRequest || event->type() == QEvent::Show) {
+            QTimer::singleShot(0, this, [this]() { refreshMessageListLayout(); });
+        }
+    }
+
+    if (event->type() == QEvent::MouseButtonPress) {
+        if (watched == ui->side_head_lb) {
+            showFeatureComingSoon(QStringLiteral("聊天列表"));
+            return true;
+        }
+        if (watched == ui->label_2) {
+            showFeatureComingSoon(QStringLiteral("通讯录"));
+            return true;
+        }
+        if (watched == ui->label_3) {
+            showFeatureComingSoon(QStringLiteral("发现"));
+            return true;
+        }
+        if (watched == ui->side_chat_lb) {
+            loadFriendList();
+            QMessageBox::information(this, QStringLiteral("好友"), QStringLiteral("已刷新好友列表"));
+            return true;
+        }
+        if (watched == ui->label_4) {
+            showFeatureComingSoon(QStringLiteral("设置"));
+            return true;
+        }
+        if (watched == ui->label_6) {
+            showFeatureComingSoon(QStringLiteral("通话"));
+            return true;
+        }
+        if (watched == ui->label_5) {
+            showFeatureComingSoon(QStringLiteral("更多"));
+            return true;
+        }
+        if (watched == ui->side_connect_lb) {
+            showFeatureComingSoon(QStringLiteral("个人资料"));
+            return true;
+        }
+        if (watched == ui->emo_lb) {
+            showFeatureComingSoon(QStringLiteral("表情"));
+            return true;
+        }
+        if (watched == ui->label_8) {
+            showFeatureComingSoon(QStringLiteral("截图"));
+            return true;
+        }
+        if (watched == ui->label_9) {
+            showFeatureComingSoon(QStringLiteral("语音录制"));
+            return true;
+        }
+        if (watched == ui->label_7) {
+            clearCurrentConversation();
+            return true;
+        }
+    }
     return QDialog::eventFilter(watched, event);
+}
+
+void Chat_Dialog::showFeatureComingSoon(const QString &featureName)
+{
+    QMessageBox::information(this, QStringLiteral("提示"), featureName + QStringLiteral("功能开发中"));
 }
 
 void Chat_Dialog::onFileClicked()
@@ -631,15 +1219,17 @@ void Chat_Dialog::onFileClicked()
 
     QString header = "FILE::" + fi.fileName() + "::" + QString::number(m_sendFileSize) +
                      "::" + username + "::" + currentPeer + "\n";
-    socket->write(header.toUtf8());
+    const QByteArray headerBytes = header.toUtf8();
+    m_sendHeaderBytesRemaining = headerBytes.size();
+    socket->write(headerBytes);
 
-    // 创建发送端气泡
-    m_currentSendFileWid = new ChatFileWid(ChatFileWid::Sender, fi.fileName(), m_sendFileSize, currentPeer);
-    QListWidgetItem *item = new QListWidgetItem(ui->listWidget);
-    item->setSizeHint(m_currentSendFileWid->sizeHint());
-    ui->listWidget->addItem(item);
-    ui->listWidget->setItemWidget(item, m_currentSendFileWid);
-    animateListItem(m_currentSendFileWid);
+    m_currentSendPeer = currentPeer;
+    const bool outgoingIsImage = isImagePath(filePath);
+    m_currentSendMessageId = appendPeerFileMessage(currentPeer, username, fi.fileName(), m_sendFileSize,
+                                                   true, false, filePath, outgoingIsImage);
+    if (outgoingIsImage) {
+        requestThumbnailGeneration(currentPeer, m_currentSendMessageId, filePath);
+    }
 
     sendNextChunk();
 }
@@ -655,18 +1245,31 @@ void Chat_Dialog::onBytesSent(qint64 bytes)
 {
     if (!m_sendFile.isOpen()) return;
 
-    m_sendFileSent += bytes;
-    if (m_currentSendFileWid) {
-        m_currentSendFileWid->updateProgress(m_sendFileSent, m_sendFileSize);
+    qint64 payloadBytes = bytes;
+    if (m_sendHeaderBytesRemaining > 0) {
+        const qint64 consumed = qMin(m_sendHeaderBytesRemaining, payloadBytes);
+        m_sendHeaderBytesRemaining -= consumed;
+        payloadBytes -= consumed;
     }
+    if (payloadBytes <= 0) {
+        return;
+    }
+
+    m_sendFileSent += payloadBytes;
+    updatePeerFileProgress(m_currentSendPeer, m_currentSendMessageId, m_sendFileSent, false, false);
 
     if (m_sendFileSent >= m_sendFileSize || m_sendFile.atEnd()) {
         m_sendFile.close();
-        if (m_currentSendFileWid) m_currentSendFileWid->setCompleted();
-        m_currentSendFileWid = nullptr;
+        updatePeerFileProgress(m_currentSendPeer, m_currentSendMessageId, m_sendFileSize, true, false);
+        if (m_currentSendPeer == currentPeer) {
+            addSystemBubble(QStringLiteral("文件发送完成"));
+        }
+        m_currentSendMessageId = -1;
+        m_currentSendPeer.clear();
         m_sendFilePath.clear();
         m_sendFileSize = 0;
         m_sendFileSent = 0;
+        m_sendHeaderBytesRemaining = 0;
         return;
     }
 
@@ -675,26 +1278,56 @@ void Chat_Dialog::onBytesSent(qint64 bytes)
     }
 }
 
-void Chat_Dialog::onDownloadClicked(const QString &fileName, qint64 fileSize, const QString &peerName)
+void Chat_Dialog::onDownloadClicked(int row)
 {
-    Q_UNUSED(fileSize);
-    Q_UNUSED(peerName);
+    if (currentPeer.isEmpty() || !m_messageModel) {
+        return;
+    }
+    if (row < 0 || row >= m_messageModel->rowCount()) {
+        return;
+    }
+    ChatMessageListModel::MessageItem message = m_messageModel->messageAt(row);
+    if (message.type != ChatMessageListModel::MessageItem::File || message.localPath.isEmpty()) {
+        return;
+    }
+    if (!QFile::exists(message.localPath)) {
+        QMessageBox::warning(this, QStringLiteral("错误"), QStringLiteral("临时文件不存在，可能已被系统清理"));
+        return;
+    }
 
-    QString savePath = QFileDialog::getSaveFileName(this, QStringLiteral("另存为"), fileName);
+    QString savePath = QFileDialog::getSaveFileName(this, QStringLiteral("另存为"), message.fileName);
     if (savePath.isEmpty()) return;
 
     m_targetSavePath = savePath;
 
-    // 如果文件已经接收全了（缓存在临时目录中）
-    if (!m_recvFile && QFile::exists(m_inFile.fileName())) {
-        if (QFile::copy(m_inFile.fileName(), m_targetSavePath)) {
-             QMessageBox::information(this, QStringLiteral("提示"), QStringLiteral("文件已保存至：") + m_targetSavePath);
-        } else {
-             QMessageBox::warning(this, QStringLiteral("错误"), QStringLiteral("保存失败，可能文件已被移动或权限不足"));
-        }
-    } else if (m_recvFile) {
-        // 如果还在下载中，只需设置 m_targetSavePath，在 consumeFileBytes 结束时会自动拷贝
-        QMessageBox::information(this, QStringLiteral("提示"), QStringLiteral("正在后台下载，完成后将自动保存到：") + m_targetSavePath);
+    QFile::remove(m_targetSavePath);
+    if (QFile::copy(message.localPath, m_targetSavePath)) {
+        QMessageBox::information(this, QStringLiteral("提示"), QStringLiteral("文件已保存至：") + m_targetSavePath);
+    } else {
+        QMessageBox::warning(this, QStringLiteral("错误"), QStringLiteral("保存失败，可能权限不足或目标文件被占用"));
+    }
+}
+
+void Chat_Dialog::onImageClicked(int row)
+{
+    if (currentPeer.isEmpty() || !m_messageModel) {
+        return;
+    }
+    if (row < 0 || row >= m_messageModel->rowCount()) {
+        return;
+    }
+
+    const ChatMessageListModel::MessageItem message = m_messageModel->messageAt(row);
+    if (!message.isImage || message.localPath.isEmpty()) {
+        return;
+    }
+    if (!QFile::exists(message.localPath)) {
+        QMessageBox::warning(this, QStringLiteral("错误"), QStringLiteral("原图文件不存在，可能已被系统清理"));
+        return;
+    }
+
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(message.localPath))) {
+        QMessageBox::warning(this, QStringLiteral("错误"), QStringLiteral("无法打开图片预览"));
     }
 }
 

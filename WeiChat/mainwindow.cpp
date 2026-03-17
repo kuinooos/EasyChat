@@ -7,6 +7,44 @@
 #include<QMouseEvent>
 #include<QApplication>
 #include<QStyle>
+
+namespace {
+
+struct ButtonThemeColors {
+    QColor base;
+    QColor hover;
+    QColor press;
+    QString themeIconPath;
+};
+
+ButtonThemeColors buttonThemeColors(const QString &theme)
+{
+    const bool light = (theme == QStringLiteral("light"));
+    return {
+        light ? QColor(30, 31, 33, 220) : QColor(220, 223, 228, 220),
+        light ? QColor(10, 10, 12, 255) : QColor(255, 255, 255, 230),
+        light ? QColor(0, 0, 0, 200) : QColor(255, 255, 255, 200),
+        light ? QStringLiteral(":/svg/sun.svg") : QStringLiteral(":/svg/moon.svg")
+    };
+}
+
+void repolishRecursively(QWidget *root)
+{
+    if (!root) {
+        return;
+    }
+
+    QList<QWidget *> widgets = root->findChildren<QWidget *>();
+    widgets.prepend(root);
+    for (QWidget *widget : widgets) {
+        widget->style()->unpolish(widget);
+        widget->style()->polish(widget);
+        widget->update();
+    }
+}
+
+}
+
 MainWindow::MainWindow(const QString &username, const ServerConfig &serverConfig, QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
@@ -43,6 +81,10 @@ MainWindow::MainWindow(const QString &username, const ServerConfig &serverConfig
         applyTheme(m_theme);
     });
 
+    const QString appTheme = qApp->property("theme").toString();
+    if (!appTheme.isEmpty()) {
+        m_theme = appTheme;
+    }
     applyTheme(m_theme);
 }
 
@@ -148,28 +190,24 @@ void MainWindow::performResize(const QPoint &globalPos)
 
 void MainWindow::applyTheme(const QString &theme)
 {
+    m_theme = theme;
     setProperty("theme", theme);
-    if (_chat) {
-        _chat->setProperty("theme", theme);
-    }
     qApp->setProperty("theme", theme);
 
-    const bool light = (theme == QStringLiteral("light"));
-    const QColor base = light ? QColor(30, 31, 33, 220) : QColor(220, 223, 228, 220);
-    const QColor hover = light ? QColor(10, 10, 12, 255) : QColor(255, 255, 255, 230);
-    const QColor press = light ? QColor(0, 0, 0, 200) : QColor(255, 255, 255, 200);
-    const QString iconPath = light ? QStringLiteral(":/svg/sun.svg") : QStringLiteral(":/svg/moon.svg");
+    if (_chat) {
+        _chat->applyTheme(theme);
+    }
+
+    const ButtonThemeColors colors = buttonThemeColors(theme);
 
     for (auto *btn : findChildren<AnimatedIconButton*>()) {
-        btn->setBaseColor(base);
-        btn->setHoverColor(hover);
-        btn->setPressColor(press);
+        btn->setBaseColor(colors.base);
+        btn->setHoverColor(colors.hover);
+        btn->setPressColor(colors.press);
         if (btn->objectName() == QStringLiteral("title_theme_btn")) {
-            btn->setSvgIcon(iconPath);
+            btn->setSvgIcon(colors.themeIconPath);
         }
     }
 
-    style()->unpolish(this);
-    style()->polish(this);
-    update();
+    repolishRecursively(this);
 }

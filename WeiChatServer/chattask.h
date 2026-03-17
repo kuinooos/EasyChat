@@ -8,6 +8,8 @@
 #include<QSqlDatabase>
 #include<QFile>
 #include<QDir>
+#include<QVector>
+#include<QFutureWatcher>
 
 class ChatServer;
 
@@ -29,6 +31,13 @@ private slots:
     void onBytesWritten(qint64 bytes);
 
 private:
+    struct OfflineMessageRecord {
+        qint64 id = -1;
+        QString sender;
+        QString content;
+        QString sendTimeText;
+    };
+
     void processPendingData();
     void processControlMessage(const QString &message);
     bool consumeFileBytes();
@@ -38,6 +47,15 @@ private:
     static QString generateUniqueConnectionName();
     static QSqlDatabase openDatabase(QString &connectionName);
     static void closeDatabase(QSqlDatabase &db, const QString &connectionName);
+    static bool ensureOfflineMessageSchema(QSqlDatabase &db);
+    static bool updateUserOnlineStatus(const QString &username, int status);
+    static QVector<OfflineMessageRecord> loadUnreadOfflineMessages(QSqlDatabase &db, const QString &receiver,
+                                                                   int offset = 0, int limit = 50);
+    static bool markOfflineMessageRead(QSqlDatabase &db, qint64 offlineId, const QString &receiver);
+
+    void deliverPendingOfflineMessages();
+    void fetchOfflineBatchAsync(int offset);
+    void deliverOfflineMessage(qint64 offlineId, const QString &sender, const QString &content, const QString &sendTimeText);
     QString buildTempFilePath(const QString &incomingFileName) const;
     void resetIncomingFileState(bool removeTempFile);
     void resetOutgoingFileState(bool removeTemp);

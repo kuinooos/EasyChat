@@ -1,6 +1,8 @@
 QT += core gui
 QT += network
+QT += sql
 QT += svg
+QT += concurrent
 
 greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 
@@ -11,6 +13,9 @@ RC_ICONS='weichat.ico'
 #DEFINES += QT_DISABLE_DEPRECATED_BEFORE=0x060000    # disables all the APIs deprecated before Qt 6.0.0
 
 SOURCES += \
+    chatmessagedelegate.cpp \
+    chatmessagelistmodel.cpp \
+    chatstorage.cpp \
     chat_dialog.cpp \
     chatbubble.cpp \
     chatuserlist.cpp \
@@ -28,6 +33,9 @@ SOURCES += \
     titlebar.cpp
 
 HEADERS += \
+    chatmessagedelegate.h \
+    chatmessagelistmodel.h \
+    chatstorage.h \
     chat_dialog.h \
     chatbubble.h \
     chatuserlist.h \

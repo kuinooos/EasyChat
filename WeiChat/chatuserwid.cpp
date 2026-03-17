@@ -15,18 +15,36 @@ ChatUserWid::~ChatUserWid()
 {
     delete ui;
 }
-void ChatUserWid::SetInfo(QString name, QString head, QString msg)
+void ChatUserWid::SetInfo(const QString &name, const QString &head, const QString &preview, bool online)
 {
     _name = name;
     _head = head;
-    _msg = msg;
+    _preview = preview;
+    _online = online;
     // 加载图片
     QPixmap pixmap(_head);
     // 设置图片自动缩放
     ui->icon_lb->setPixmap(pixmap.scaled(ui->icon_lb->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
     ui->icon_lb->setScaledContents(true);
     ui->user_name_lb->setText(_name);
-    ui->user_chat_lb->setText(_msg);
+    setOnlineState(_online, _preview);
+}
+
+void ChatUserWid::setOnlineState(bool online, const QString &preview)
+{
+    _online = online;
+    _preview = preview;
+    setProperty("online", online);
+
+    ui->user_chat_lb->setText(_preview);
+    ui->user_status_lb->setText(online ? QStringLiteral("在线") : QStringLiteral("离线"));
+    ui->status_wid->setProperty("online", online);
+
+    style()->unpolish(this);
+    style()->polish(this);
+    style()->unpolish(ui->status_wid);
+    style()->polish(ui->status_wid);
+    update();
 }
 
 void ChatUserWid::setSelected(bool selected)

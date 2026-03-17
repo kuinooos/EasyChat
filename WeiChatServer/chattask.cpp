@@ -6,6 +6,7 @@
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QtConcurrent/QtConcurrent>
+#include <QFutureWatcher>
 
 ChatTask::ChatTask(qintptr socketDescriptor, ChatServer* router, QObject *parent)
     : QObject(parent), socketDescriptor(socketDescriptor), m_router(router) {
@@ -104,6 +105,7 @@ void ChatTask::handleSocketDisconnect() {
         m_socket = nullptr;
     }
     if (m_router) m_router->unregisterUser(id);
+    if (!id.isEmpty()) updateUserOnlineStatus(id, 0);
     emit finished();
 }
 
@@ -115,6 +117,26 @@ void ChatTask::processControlMessage(const QString &message) {
         if (parts.size() < 2) return;
         username = parts[1];
         if (m_router) m_router->registerUser(username, this);
+        updateUserOnlineStatus(username, 1);
+        deliverPendingOfflineMessages();
+        return;
+    }
+
+    if (parts[0] == "ACK") {
+        if (parts.size() < 2 || username.isEmpty()) return;
+        bool ok = false;
+        const qint64 offlineId = parts[1].toLongLong(&ok);
+        if (!ok || offlineId <= 0) return;
+
+        QString connectionName;
+        QSqlDatabase db = openDatabase(connectionName);
+        if (!db.isOpen()) {
+            closeDatabase(db, connectionName);
+            return;
+        }
+        ensureOfflineMessageSchema(db);
+        markOfflineMessageRead(db, offlineId, username);
+        closeDatabase(db, connectionName);
         return;
     }
 
@@ -191,6 +213,173 @@ void ChatTask::closeDatabase(QSqlDatabase &db, const QString &connectionName) {
     QSqlDatabase::removeDatabase(connectionName);
 }
 
+bool ChatTask::ensureOfflineMessageSchema(QSqlDatabase &db)
+{
+    QSqlQuery query(db);
+    if (!query.exec(
+            "IF COL_LENGTH('messages', 'id') IS NULL "
+            "BEGIN "
+            "ALTER TABLE messages ADD id BIGINT IDENTITY(1,1) NOT NULL; "
+            "END")) {
+        qWarning() << "补充 messages.id 字段失败" << query.lastError().text();
+        return false;
+    }
+
+    if (!query.exec(
+            "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_messages_receiver_read_time' AND object_id = OBJECT_ID('messages')) "
+            "BEGIN "
+            "CREATE INDEX idx_messages_receiver_read_time ON messages(receiver_id, is_read, send_time); "
+            "END")) {
+        qWarning() << "创建离线消息索引失败" << query.lastError().text();
+        return false;
+    }
+
+    return true;
+}
+
+bool ChatTask::updateUserOnlineStatus(const QString &username, int status)
+{
+    QString connectionName;
+    QSqlDatabase db = openDatabase(connectionName);
+    if (!db.isOpen()) {
+        closeDatabase(db, connectionName);
+        return false;
+    }
+
+    QSqlQuery query(db);
+    query.prepare("UPDATE client SET is_online = :status WHERE username = :username");
+    query.bindValue(":status", status);
+    query.bindValue(":username", username);
+    const bool ok = query.exec();
+    if (!ok) {
+        qWarning() << "更新在线状态失败" << username << query.lastError().text();
+    }
+
+    closeDatabase(db, connectionName);
+    return ok;
+}
+
+QVector<ChatTask::OfflineMessageRecord> ChatTask::loadUnreadOfflineMessages(
+        QSqlDatabase &db, const QString &receiver, int offset, int limit)
+{
+    QVector<OfflineMessageRecord> records;
+    QSqlQuery query(db);
+    // 兼容旧版 SQL Server：使用 ROW_NUMBER 分页，避免 OFFSET/FETCH 语法不支持
+    // ensureOfflineMessageSchema 已保证 id 列存在，ORDER BY id 提供稳定分页顺序
+    const int startRow = offset + 1;
+    const int endRow = offset + limit;
+    query.prepare(
+        "WITH unread AS ("
+        "SELECT id, sender_id, message_text, CONVERT(varchar(23), send_time, 121) AS send_time_text, "
+        "ROW_NUMBER() OVER (ORDER BY send_time ASC, id ASC) AS rn "
+        "FROM messages WHERE receiver_id = :receiver AND ISNULL(is_read, 0) = 0"
+        ") "
+        "SELECT id, sender_id, message_text, send_time_text "
+        "FROM unread WHERE rn BETWEEN :startRow AND :endRow "
+        "ORDER BY rn ASC");
+    query.bindValue(":receiver", receiver);
+    query.bindValue(":startRow", startRow);
+    query.bindValue(":endRow",   endRow);
+    if (!query.exec()) {
+        qWarning() << "查询离线消息失败 offset=" << offset << query.lastError().text();
+        return records;
+    }
+
+    while (query.next()) {
+        OfflineMessageRecord item;
+        item.id           = query.value(0).toLongLong();
+        item.sender       = query.value(1).toString();
+        item.content      = query.value(2).toString();
+        item.sendTimeText = query.value(3).toString();
+        records.push_back(item);
+    }
+    return records;
+}
+
+bool ChatTask::markOfflineMessageRead(QSqlDatabase &db, qint64 offlineId, const QString &receiver)
+{
+    QSqlQuery query(db);
+    query.prepare("UPDATE messages SET is_read = 1 WHERE id = :id AND receiver_id = :receiver");
+    query.bindValue(":id", offlineId);
+    query.bindValue(":receiver", receiver);
+    if (!query.exec()) {
+        qWarning() << "更新离线消息已读失败" << offlineId << query.lastError().text();
+        return false;
+    }
+    return query.numRowsAffected() > 0;
+}
+
+void ChatTask::deliverPendingOfflineMessages()
+{
+    // 入口只做前置检查，真正的 DB 查询交给 fetchOfflineBatchAsync 异步执行
+    if (!m_socket || m_socket->state() != QAbstractSocket::ConnectedState || username.isEmpty())
+        return;
+    fetchOfflineBatchAsync(0);
+}
+
+void ChatTask::fetchOfflineBatchAsync(int offset)
+{
+    if (!m_socket || m_socket->state() != QAbstractSocket::ConnectedState || username.isEmpty())
+        return;
+
+    // 每批 50 条；constexpr 在 lambda 体内可直接使用（C++11 起免捕获）
+    constexpr int kBatch = 50;
+    const QString user = username;   // 按值捕获，防止 this 销毁后悬空引用
+
+    // QFutureWatcher 挂载到 this：ChatTask 销毁时 watcher 自动析构，信号连接自动断开
+    auto *watcher = new QFutureWatcher<QVector<OfflineMessageRecord>>(this);
+
+    // finished 信号在 ChatTask 所在的 WorkerThread 事件循环中派发；
+    // DB 查询期间事件循环照常运行，可处理该用户的心跳包或实时消息
+    connect(watcher, &QFutureWatcher<QVector<OfflineMessageRecord>>::finished,
+            this, [this, watcher, offset]() {
+        watcher->deleteLater();
+
+        const QVector<OfflineMessageRecord> batch = watcher->result();
+        qDebug() << "[离线补发]" << username
+                 << "第" << (offset / 50 + 1) << "批，本批" << batch.size() << "条";
+
+        for (const OfflineMessageRecord &item : batch) {
+            if (!m_socket || m_socket->state() != QAbstractSocket::ConnectedState)
+                return;   // socket 中途断开，终止推送
+            deliverOfflineMessage(item.id, item.sender, item.content, item.sendTimeText);
+        }
+
+        // 本批恰好满 kBatch 条，说明可能还有更多，继续取下一页
+        if (batch.size() == kBatch)
+            fetchOfflineBatchAsync(offset + kBatch);
+    });
+
+    // 在 Qt 全局线程池中执行 DB 查询，完全不阻塞 WorkerThread 事件循环
+    watcher->setFuture(QtConcurrent::run([user, offset]() -> QVector<OfflineMessageRecord> {
+        QString connectionName;
+        QSqlDatabase db = openDatabase(connectionName);
+        QVector<OfflineMessageRecord> records;
+        if (!db.isOpen()) {
+            closeDatabase(db, connectionName);
+            return records;
+        }
+        ensureOfflineMessageSchema(db);
+        records = loadUnreadOfflineMessages(db, user, offset, kBatch);
+        closeDatabase(db, connectionName);
+        return records;
+    }));
+}
+
+void ChatTask::deliverOfflineMessage(qint64 offlineId, const QString &sender, const QString &content, const QString &sendTimeText)
+{
+    if (!m_socket || m_socket->state() != QAbstractSocket::ConnectedState) {
+        return;
+    }
+    const QByteArray encoded = content.toUtf8().toBase64();
+    const QString packet = QStringLiteral("OFFLINE::%1::%2::%3::%4\n")
+                               .arg(offlineId)
+                               .arg(sender)
+                               .arg(QString::fromLatin1(encoded))
+                               .arg(sendTimeText);
+    m_socket->write(packet.toUtf8());
+}
+
 QString ChatTask::buildTempFilePath(const QString &incomingFileName) const {
     const QString safeName = incomingFileName.isEmpty() ? "incoming.bin" : incomingFileName;
     return QDir::temp().filePath(generateUniqueConnectionName() + "_" + safeName);
@@ -228,8 +417,9 @@ void ChatTask::persistOfflineMessageAsync(const QString &sender, const QString &
         QString connectionName;
         QSqlDatabase db = openDatabase(connectionName);
         if (!db.isOpen()) { closeDatabase(db, connectionName); return; }
+        ensureOfflineMessageSchema(db);
         QSqlQuery query(db);
-        query.prepare("INSERT INTO messages(sender_id,receiver_id,message_text,send_time) VALUES(:username,:friendname,:content,:send_time)");
+        query.prepare("INSERT INTO messages(sender_id,receiver_id,message_text,send_time,is_read) VALUES(:username,:friendname,:content,:send_time,0)");
         query.bindValue(":username", sender); query.bindValue(":friendname", receiver);
         query.bindValue(":content", message); query.bindValue(":send_time", QDateTime::currentDateTime());
         if (!query.exec()) qWarning() << "离线消息写入失败" << query.lastError().text();
@@ -246,8 +436,9 @@ void ChatTask::persistOfflineFileAsync(const QString &sender, const QString &rec
         QString connectionName;
         QSqlDatabase db = openDatabase(connectionName);
         if (!db.isOpen()) { closeDatabase(db, connectionName); QFile::remove(filePath); return; }
+        ensureOfflineMessageSchema(db);
         QSqlQuery query(db);
-        query.prepare("INSERT INTO messages(sender_id,receiver_id,message_text,send_time) VALUES(:username,:friendname,:content,:send_time)");
+        query.prepare("INSERT INTO messages(sender_id,receiver_id,message_text,send_time,is_read) VALUES(:username,:friendname,:content,:send_time,0)");
         query.bindValue(":username", sender); query.bindValue(":friendname", receiver);
         query.bindValue(":content", fileData.toBase64()); query.bindValue(":send_time", QDateTime::currentDateTime());
         if (!query.exec()) qWarning() << "离线文件写入失败" << query.lastError().text();
