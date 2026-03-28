@@ -12,8 +12,10 @@ CONFIG -= app_bundle
 SOURCES += \
         chatserver.cpp \
         chattask.cpp \
+    dbconnectionmanager.cpp \
         friendServer.cpp \
-        main.cpp
+        main.cpp \
+        offlinebufferservice.cpp
 
 # Default rules for deployment.
 qnx: target.path = /tmp/$${TARGET}/bin
@@ -23,5 +25,7 @@ else: unix:!android: target.path = /opt/$${TARGET}/bin
 HEADERS += \
     chatserver.h \
     chattask.h \
+    dbconnectionmanager.h \
     friendserver.h \
+        offlinebufferservice.h \
     workerthread.h

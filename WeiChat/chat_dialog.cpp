@@ -151,6 +151,15 @@ void repolishRecursively(QWidget *root)
     }
 }
 
+QString normalizeHostForConnect(QString host)
+{
+    host = host.trimmed();
+    if (host.startsWith('[') && host.endsWith(']') && host.size() > 2) {
+        host = host.mid(1, host.size() - 2);
+    }
+    return host;
+}
+
 }
 Chat_Dialog::Chat_Dialog(const QString &username, const ServerConfig &serverConfig, QWidget *parent)
     : QDialog(parent)
@@ -222,6 +231,10 @@ Chat_Dialog::Chat_Dialog(const QString &username, const ServerConfig &serverConf
     m_friendRefreshTimer = new QTimer(this);
     m_friendRefreshTimer->setInterval(5000);
     connect(m_friendRefreshTimer, &QTimer::timeout, this, &Chat_Dialog::loadFriendList);
+
+    m_heartbeatTimer = new QTimer(this);
+    m_heartbeatTimer->setInterval(5000);
+    connect(m_heartbeatTimer, &QTimer::timeout, this, &Chat_Dialog::sendHeartbeat);
 
     const QList<QLabel *> clickableLabels = {
         ui->side_connect_lb, ui->side_head_lb, ui->label_2, ui->label_3, ui->side_chat_lb,
@@ -386,7 +399,8 @@ void Chat_Dialog::initializeConnection()
     connect(socket, &QTcpSocket::disconnected, this, &Chat_Dialog::on_disconnected);
     connect(socket, &QAbstractSocket::bytesWritten, this, &Chat_Dialog::onBytesSent);
 
-    socket->connectToHost(serverConfig.host, serverConfig.chatPort);
+    const QString host = normalizeHostForConnect(serverConfig.host);
+    socket->connectToHost(host, serverConfig.chatPort);
     if (!socket->waitForConnected(3000)) {
         addSystemBubble(QStringLiteral("连接聊天服务器失败: ") + socket->errorString());
         return;
@@ -399,6 +413,9 @@ void Chat_Dialog::initializeConnection()
     loadFriendList();
     if (m_friendRefreshTimer && !m_friendRefreshTimer->isActive()) {
         m_friendRefreshTimer->start();
+    }
+    if (m_heartbeatTimer && !m_heartbeatTimer->isActive()) {
+        m_heartbeatTimer->start();
     }
 }
 
@@ -469,7 +486,7 @@ void Chat_Dialog::loadFriendList()
 QString Chat_Dialog::sendFriendCommand(const QString &command)
 {
     QTcpSocket friendSocket;
-    friendSocket.connectToHost(serverConfig.host, serverConfig.friendPort);
+    friendSocket.connectToHost(normalizeHostForConnect(serverConfig.host), serverConfig.friendPort);
     if (!friendSocket.waitForConnected(2000)) {
         return QStringLiteral("__FRIEND_SERVER_ERROR__");
     }
@@ -497,8 +514,11 @@ void Chat_Dialog::notifyOffline()
     }
 
     offlineNotified = true;
+    if (m_heartbeatTimer && m_heartbeatTimer->isActive()) {
+        m_heartbeatTimer->stop();
+    }
     QTcpSocket offlineSocket;
-    offlineSocket.connectToHost(serverConfig.host, serverConfig.offlinePort);
+    offlineSocket.connectToHost(normalizeHostForConnect(serverConfig.host), serverConfig.offlinePort);
     if (!offlineSocket.waitForConnected(1000)) {
         return;
     }
@@ -506,6 +526,15 @@ void Chat_Dialog::notifyOffline()
     offlineSocket.write(username.toUtf8());
     offlineSocket.waitForBytesWritten(1000);
     offlineSocket.disconnectFromHost();
+}
+
+void Chat_Dialog::sendHeartbeat()
+{
+    if (!socket || socket->state() != QAbstractSocket::ConnectedState || username.isEmpty()) {
+        return;
+    }
+    const QString heartbeat = QStringLiteral("HEARTBEAT::") + username + QStringLiteral("\n");
+    socket->write(heartbeat.toUtf8());
 }
 
 void Chat_Dialog::addChatUserItem(const QString &name, const QString &head, const QString &preview, bool online, bool selectByDefault)
@@ -996,24 +1025,19 @@ void Chat_Dialog::processPendingData()
                 m_incomingPeer = m_inFileSender;
                 const bool incomingIsImage = isImagePath(m_inFileName);
 
-                m_fileGot = 0;
-                m_recvFile = m_fileExp > 0;
-                m_targetSavePath.clear();
-
-                // 微信模式：后台自动下载到临时文件夹
-                QString tempPath = QDir::tempPath() + "/WeiChat_recv_" + m_inFileName;
-                m_inFile.setFileName(tempPath);
-                if (!m_inFile.open(QIODevice::WriteOnly)) {
-                     // 如果临时文件打不开，可以用一个 uuid 命名重试
-                     tempPath = QDir::tempPath() + "/" + QUuid::createUuid().toString() + "_" + m_inFileName;
-                     m_inFile.setFileName(tempPath);
-                     m_inFile.open(QIODevice::WriteOnly);
-                }
-
                 m_currentRecvMessageId = appendPeerFileMessage(m_incomingPeer, m_inFileSender, m_inFileName, m_fileExp,
-                                                                false, true, m_inFile.fileName(), incomingIsImage);
+                                                                false, true, QString(), incomingIsImage);
 
-                if (!m_recvBuf.isEmpty()) consumeFileBytes();
+                PendingIncomingFile pending;
+                pending.sender = m_inFileSender;
+                pending.receiver = parts[4];
+                pending.fileName = m_inFileName;
+                pending.fileSize = m_fileExp;
+                m_pendingIncomingFiles.insert(m_currentRecvMessageId, pending);
+
+                if (m_incomingPeer == currentPeer) {
+                    addSystemBubble(QStringLiteral("收到文件：%1，点击下载开始接收").arg(m_inFileName));
+                }
             }
         } else {
             addSystemBubble(message);
@@ -1079,6 +1103,7 @@ void Chat_Dialog::resetIncomingFileState()
     m_inFileName.clear();
     m_inFileSender.clear();
     m_incomingPeer.clear();
+    m_targetSavePath.clear();
     m_currentRecvMessageId = -1;
 }
 
@@ -1287,24 +1312,78 @@ void Chat_Dialog::onDownloadClicked(int row)
         return;
     }
     ChatMessageListModel::MessageItem message = m_messageModel->messageAt(row);
-    if (message.type != ChatMessageListModel::MessageItem::File || message.localPath.isEmpty()) {
-        return;
-    }
-    if (!QFile::exists(message.localPath)) {
-        QMessageBox::warning(this, QStringLiteral("错误"), QStringLiteral("临时文件不存在，可能已被系统清理"));
+    if (message.type != ChatMessageListModel::MessageItem::File) {
         return;
     }
 
     QString savePath = QFileDialog::getSaveFileName(this, QStringLiteral("另存为"), message.fileName);
     if (savePath.isEmpty()) return;
 
-    m_targetSavePath = savePath;
+    if (!message.localPath.isEmpty() && QFile::exists(message.localPath)) {
+        QFile::remove(savePath);
+        if (QFile::copy(message.localPath, savePath)) {
+            QMessageBox::information(this, QStringLiteral("提示"), QStringLiteral("文件已保存至：") + savePath);
+        } else {
+            QMessageBox::warning(this, QStringLiteral("错误"), QStringLiteral("保存失败，可能权限不足或目标文件被占用"));
+        }
+        return;
+    }
 
-    QFile::remove(m_targetSavePath);
-    if (QFile::copy(message.localPath, m_targetSavePath)) {
-        QMessageBox::information(this, QStringLiteral("提示"), QStringLiteral("文件已保存至：") + m_targetSavePath);
-    } else {
-        QMessageBox::warning(this, QStringLiteral("错误"), QStringLiteral("保存失败，可能权限不足或目标文件被占用"));
+    if (m_recvFile) {
+        QMessageBox::information(this, QStringLiteral("提示"), QStringLiteral("当前有文件正在接收，请稍后再试"));
+        return;
+    }
+    if (!socket || socket->state() != QAbstractSocket::ConnectedState) {
+        QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("未连接到服务器"));
+        return;
+    }
+
+    const qint64 messageId = message.messageId;
+    if (!m_pendingIncomingFiles.contains(messageId)) {
+        QMessageBox::warning(this, QStringLiteral("错误"), QStringLiteral("文件信息已失效，请让对方重新发送"));
+        return;
+    }
+
+    const PendingIncomingFile pending = m_pendingIncomingFiles.value(messageId);
+    m_targetSavePath = savePath;
+    m_inFileName = pending.fileName;
+    m_inFileSender = pending.sender;
+    m_incomingPeer = pending.sender;
+    m_currentRecvMessageId = messageId;
+    m_fileExp = pending.fileSize;
+    m_fileGot = 0;
+    m_recvFile = m_fileExp > 0;
+
+    QString tempPath = QDir::tempPath() + "/WeiChat_recv_" + m_inFileName;
+    m_inFile.setFileName(tempPath);
+    if (!m_inFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        tempPath = QDir::tempPath() + "/" + QUuid::createUuid().toString() + "_" + m_inFileName;
+        m_inFile.setFileName(tempPath);
+        if (!m_inFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            QMessageBox::warning(this, QStringLiteral("错误"), QStringLiteral("无法创建临时文件"));
+            resetIncomingFileState();
+            return;
+        }
+    }
+
+    updatePeerFileProgress(m_incomingPeer, m_currentRecvMessageId, 0, false, true, m_inFile.fileName());
+
+    const QString ready = QStringLiteral("FILE_READY::%1::%2::%3::%4\n")
+                              .arg(pending.sender)
+                              .arg(username)
+                              .arg(pending.fileName)
+                              .arg(pending.fileSize);
+    socket->write(ready.toUtf8());
+    m_pendingIncomingFiles.remove(messageId);
+
+    if (m_fileExp == 0) {
+        updatePeerFileProgress(m_incomingPeer, m_currentRecvMessageId, 0, true, true, m_inFile.fileName());
+        m_inFile.close();
+        QFile::remove(m_targetSavePath);
+        if (QFile::copy(m_inFile.fileName(), m_targetSavePath)) {
+            QMessageBox::information(this, QStringLiteral("提示"), QStringLiteral("文件已保存至：") + m_targetSavePath);
+        }
+        resetIncomingFileState();
     }
 }
 
@@ -1333,6 +1412,9 @@ void Chat_Dialog::onImageClicked(int row)
 
 void Chat_Dialog::on_disconnected()
 {
+    if (m_heartbeatTimer && m_heartbeatTimer->isActive()) {
+        m_heartbeatTimer->stop();
+    }
     qDebug() << "Disconnected from server!";
     addSystemBubble(QStringLiteral("与服务器断开连接"));
 }

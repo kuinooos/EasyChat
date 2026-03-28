@@ -50,6 +50,15 @@ void repolishRecursively(QWidget *root)
     }
 }
 
+QString normalizeHostForConnect(QString host)
+{
+    host = host.trimmed();
+    if (host.startsWith('[') && host.endsWith(']') && host.size() > 2) {
+        host = host.mid(1, host.size() - 2);
+    }
+    return host;
+}
+
 }
 
 LoginDialog::LoginDialog(QWidget *parent)
@@ -220,7 +229,7 @@ void LoginDialog::attemptLogin()
     const QString currentUsername = username();
     const QString currentPassword = passwordEdit->text();
     const ServerConfig configValue = config();
-    const QString host = configValue.host;
+    const QString host = normalizeHostForConnect(configValue.host);
     const quint16 port = configValue.loginPort;
 
     if (currentUsername.isEmpty() || currentPassword.isEmpty()) {
@@ -236,7 +245,7 @@ void LoginDialog::attemptLogin()
     QTcpSocket socket;
     socket.connectToHost(host, port);
     if (!socket.waitForConnected(3000)) {
-        statusLabel->setText(QStringLiteral("连接登录服务器失败"));
+        statusLabel->setText(QStringLiteral("连接登录服务器失败: %1").arg(socket.errorString()));
         return;
     }
 

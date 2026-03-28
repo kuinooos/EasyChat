@@ -20,9 +20,14 @@ public:
         QHostAddress server_ip(read_ip_address());
         Q_UNUSED(server_ip);
         if (listen(QHostAddress::AnyIPv6,12345)) {
-            qDebug() << "IPv6 register server started on port 12345" << serverAddress().toString();
+            qDebug() << "RegisterServer started on" << serverAddress().toString() << "port 12345 (IPv6)";
         } else {
-            qDebug() << "Failed to start IPv6 register server!";
+            qWarning() << "RegisterServer IPv6 listen failed:" << errorString() << "falling back to IPv4";
+            if (listen(QHostAddress::Any, 12345)) {
+                qDebug() << "RegisterServer started on" << serverAddress().toString() << "port 12345 (IPv4 fallback)";
+            } else {
+                qWarning() << "RegisterServer failed to start on both IPv6 and IPv4:" << errorString();
+            }
         }
     };
 

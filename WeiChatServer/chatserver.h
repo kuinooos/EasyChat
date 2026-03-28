@@ -7,6 +7,7 @@
 
 class ChatTask;
 class WorkerThread;
+class OfflineBufferService;
 
 class ChatServer : public QTcpServer {
     Q_OBJECT
@@ -30,4 +31,5 @@ private:
     QHash<QString, QPointer<ChatTask>> *clientTaskMap;
     QReadWriteLock mapLock;
     QVector<WorkerThread*> m_workers;
+    OfflineBufferService *m_offlineBuffer = nullptr;
 };

@@ -13,9 +13,14 @@ class Offline : public QTcpServer{
 public:
     explicit Offline(QObject *parent=nullptr) : QTcpServer(parent){
         if(this->listen(QHostAddress::AnyIPv6,7776)){
-            qDebug() << "IPv6 offline server started on port 7776" << serverAddress().toString();
+            qDebug() << "OfflineServer started on" << serverAddress().toString() << "port 7776 (IPv6)";
         }else{
-            qDebug() << "Failed to start IPv6 offline server!";
+            qWarning() << "OfflineServer IPv6 listen failed:" << errorString() << "falling back to IPv4";
+            if (this->listen(QHostAddress::Any, 7776)) {
+                qDebug() << "OfflineServer started on" << serverAddress().toString() << "port 7776 (IPv4 fallback)";
+            } else {
+                qWarning() << "OfflineServer failed to start on both IPv6 and IPv4:" << errorString();
+            }
         }
     };
 

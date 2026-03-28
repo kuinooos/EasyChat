@@ -1,12 +1,76 @@
 #include "chatserver.h"
 #include "chattask.h"
+#include "offlinebufferservice.h"
 #include "workerthread.h"
 #include <QThread>
 #include <QMetaObject>
 #include <QDebug>
+#include <QNetworkInterface>
+
+namespace {
+bool isGlobalIpv6Address(const QHostAddress &addr)
+{
+    if (addr.protocol() != QAbstractSocket::IPv6Protocol) {
+        return false;
+    }
+    if (addr.isLoopback()) {
+        return false;
+    }
+    if (addr.isLinkLocal()) {
+        return false;
+    }
+    if (addr.isMulticast()) {
+        return false;
+    }
+
+    const Q_IPV6ADDR ip6 = addr.toIPv6Address();
+    const bool isUniqueLocal = (ip6[0] & 0xFE) == 0xFC; // fc00::/7
+    return !isUniqueLocal;
+}
+
+void logReachableIpv6Hints()
+{
+    QStringList globals;
+    const QList<QHostAddress> addrs = QNetworkInterface::allAddresses();
+    for (const QHostAddress &addr : addrs) {
+        if (isGlobalIpv6Address(addr)) {
+            globals << addr.toString();
+        }
+    }
+    globals.removeDuplicates();
+
+    if (globals.isEmpty()) {
+        qWarning() << "No global IPv6 address detected. Cross-network IPv6 may fail unless your machine has routable IPv6.";
+    } else {
+        qDebug() << "Global IPv6 candidates:" << globals;
+    }
+}
+
+bool listenPreferIpv6WithFallback(QTcpServer *server, quint16 port, const QString &serviceName)
+{
+    if (server->listen(QHostAddress::AnyIPv6, port)) {
+        qDebug() << serviceName << "listening on" << server->serverAddress().toString() << "port" << port << "(IPv6)";
+        logReachableIpv6Hints();
+        return true;
+    }
+
+    const QString ipv6Err = server->errorString();
+    qWarning() << serviceName << "IPv6 listen failed:" << ipv6Err << "falling back to IPv4";
+
+    if (server->listen(QHostAddress::Any, port)) {
+        qDebug() << serviceName << "listening on" << server->serverAddress().toString() << "port" << port << "(IPv4 fallback)";
+        return true;
+    }
+
+    qWarning() << serviceName << "listen failed on both IPv6 and IPv4:" << server->errorString();
+    return false;
+}
+}
 
 ChatServer::ChatServer(QObject *parent) : QTcpServer(parent) {
     clientTaskMap = new QHash<QString, QPointer<ChatTask>>();
+    m_offlineBuffer = new OfflineBufferService(this);
+    m_offlineBuffer->start();
 
     int workerCount = QThread::idealThreadCount();
     if (workerCount <= 0) workerCount = 4;
@@ -17,14 +81,13 @@ ChatServer::ChatServer(QObject *parent) : QTcpServer(parent) {
     }
     qDebug() << "Worker threads started:" << workerCount;
 
-    if (this->listen(QHostAddress::AnyIPv6, 7777)) {
-        qDebug() << "IPv6 chat server started on port 7777" << serverAddress().toString();
-    } else {
-        qDebug() << "Failed to start IPv6 chat server!";
-    }
+    listenPreferIpv6WithFallback(this, 7777, QStringLiteral("ChatServer"));
 }
 
 ChatServer::~ChatServer() {
+    if (m_offlineBuffer) {
+        m_offlineBuffer->stop();
+    }
     for (WorkerThread *w : m_workers) {
         w->quit();
         w->wait(3000);
@@ -56,7 +119,9 @@ void ChatServer::routeMessage(const QString &sender, const QString &receiver, co
                                   Q_ARG(QString, message));
     } else {
         if (!receiver.startsWith("bench_")) {
-            ChatTask::persistOfflineMessageAsync(sender, receiver, message);
+            if (m_offlineBuffer) {
+                m_offlineBuffer->enqueueOfflineMessage(sender, receiver, message);
+            }
         }
     }
 }
@@ -78,7 +143,11 @@ void ChatServer::routeFile(const QString &sender, const QString &receiver,
                                   Q_ARG(QString, filePath));
     } else {
         if (!receiver.startsWith("bench_")) {
-            ChatTask::persistOfflineFileAsync(sender, receiver, filePath);
+            if (m_offlineBuffer) {
+                m_offlineBuffer->enqueueOfflineFile(sender, receiver, filePath);
+            } else {
+                QFile::remove(filePath);
+            }
         } else {
             QFile::remove(filePath);
         }

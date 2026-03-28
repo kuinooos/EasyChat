@@ -5,8 +5,11 @@
 #include <QUuid>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QtConcurrent/QtConcurrent>
 #include <QFutureWatcher>
+#include "dbconnectionmanager.h"
 
 ChatTask::ChatTask(qintptr socketDescriptor, ChatServer* router, QObject *parent)
     : QObject(parent), socketDescriptor(socketDescriptor), m_router(router) {
@@ -56,36 +59,52 @@ void ChatTask::deliverMessage(const QString &sender, const QString &message) {
 }
 
 void ChatTask::deliverFile(const QString &sender, const QString &receiver,
-                           const QString &fileName, qint64 fileSize, const QString &filePath) {
+                           const QString &fileName, qint64 fileSize, const QString &filePath, bool deleteAfter) {
     if (!m_socket || m_socket->state() != QAbstractSocket::ConnectedState) {
-        QFile::remove(filePath);
+        if (deleteAfter) QFile::remove(filePath);
         return;
     }
-    resetOutgoingFileState(false);
+    resetOutgoingFileState(m_outFileShouldDelete);
     m_outFile.setFileName(filePath);
     if (!m_outFile.open(QIODevice::ReadOnly)) {
         qWarning() << "无法读取待转发文件" << filePath;
-        QFile::remove(filePath);
+        if (deleteAfter) QFile::remove(filePath);
         return;
     }
     m_outFilePath = filePath;
+    m_outFileName = fileName;
+    m_outSender = sender;
+    m_outReceiver = receiver;
     m_outFileSize = fileSize;
     m_outFileSent = 0;
+    m_outTransferStarted = false;
+    m_outFileShouldDelete = deleteAfter;  // 记录是否应该删除
 
     const QString header = "FILE::" + fileName + "::" + QString::number(fileSize)
                          + "::" + sender + "::" + receiver + "\n";
-    m_socket->write(header.toUtf8());
-    writeNextFileChunk();
+    const QByteArray headerBytes = header.toUtf8();
+    m_outHeaderBytesRemaining = headerBytes.size();
+    m_socket->write(headerBytes);
 }
 
 void ChatTask::onBytesWritten(qint64 bytes) {
     if (!m_outFile.isOpen()) return;
-    m_outFileSent += bytes;
+
+    qint64 payloadBytes = bytes;
+    if (m_outHeaderBytesRemaining > 0) {
+        const qint64 consumed = qMin(m_outHeaderBytesRemaining, payloadBytes);
+        m_outHeaderBytesRemaining -= consumed;
+        payloadBytes -= consumed;
+    }
+    if (payloadBytes > 0) {
+        m_outFileSent += payloadBytes;
+    }
+
     if (m_outFileSent >= m_outFileSize || m_outFile.atEnd()) {
         resetOutgoingFileState(true);
         return;
     }
-    if (m_socket->bytesToWrite() < OUT_CHUNK * 2) {
+    if (m_outTransferStarted && m_socket->bytesToWrite() < OUT_CHUNK * 2) {
         writeNextFileChunk();
     }
 }
@@ -122,21 +141,48 @@ void ChatTask::processControlMessage(const QString &message) {
         return;
     }
 
+    if (parts[0] == "HEARTBEAT") {
+        const QString hbUser = parts.size() >= 2 ? parts[1] : username;
+        if (!hbUser.isEmpty()) {
+            if (username.isEmpty()) {
+                username = hbUser;
+            }
+        }
+        return;
+    }
+
     if (parts[0] == "ACK") {
         if (parts.size() < 2 || username.isEmpty()) return;
         bool ok = false;
         const qint64 offlineId = parts[1].toLongLong(&ok);
         if (!ok || offlineId <= 0) return;
 
-        QString connectionName;
-        QSqlDatabase db = openDatabase(connectionName);
+        QSqlDatabase db = DbConnectionManager::instance().acquire();
         if (!db.isOpen()) {
-            closeDatabase(db, connectionName);
             return;
         }
         ensureOfflineMessageSchema(db);
         markOfflineMessageRead(db, offlineId, username);
-        closeDatabase(db, connectionName);
+        return;
+    }
+
+    if (parts[0] == "FILE_READY") {
+        if (!m_outFile.isOpen() || m_outTransferStarted) return;
+        if (parts.size() >= 5) {
+            const QString sender = parts.value(1);
+            const QString receiver = parts.value(2);
+            const QString readyFileName = parts.value(3);
+            bool ok = false;
+            const qint64 readyFileSize = parts.value(4).toLongLong(&ok);
+            if (!ok || sender != m_outSender || receiver != m_outReceiver
+                || readyFileName != m_outFileName || readyFileSize != m_outFileSize) {
+                return;
+            }
+        }
+        m_outTransferStarted = true;
+        if (m_socket->bytesToWrite() < OUT_CHUNK * 2) {
+            writeNextFileChunk();
+        }
         return;
     }
 
@@ -199,20 +245,6 @@ QString ChatTask::generateUniqueConnectionName() {
         .arg(QUuid::createUuid().toString());
 }
 
-QSqlDatabase ChatTask::openDatabase(QString &connectionName) {
-    connectionName = generateUniqueConnectionName();
-    QSqlDatabase db = QSqlDatabase::addDatabase("QODBC", connectionName);
-    db.setDatabaseName("Driver={SQL Server};Server=(local);Database=ChatApp;Trusted_Connection=yes;");
-    if (!db.open()) qWarning() << "Database connection failed:" << db.lastError().text();
-    return db;
-}
-
-void ChatTask::closeDatabase(QSqlDatabase &db, const QString &connectionName) {
-    if (db.isOpen()) db.close();
-    db = QSqlDatabase();
-    QSqlDatabase::removeDatabase(connectionName);
-}
-
 bool ChatTask::ensureOfflineMessageSchema(QSqlDatabase &db)
 {
     QSqlQuery query(db);
@@ -239,10 +271,8 @@ bool ChatTask::ensureOfflineMessageSchema(QSqlDatabase &db)
 
 bool ChatTask::updateUserOnlineStatus(const QString &username, int status)
 {
-    QString connectionName;
-    QSqlDatabase db = openDatabase(connectionName);
+    QSqlDatabase db = DbConnectionManager::instance().acquire();
     if (!db.isOpen()) {
-        closeDatabase(db, connectionName);
         return false;
     }
 
@@ -255,7 +285,6 @@ bool ChatTask::updateUserOnlineStatus(const QString &username, int status)
         qWarning() << "更新在线状态失败" << username << query.lastError().text();
     }
 
-    closeDatabase(db, connectionName);
     return ok;
 }
 
@@ -298,6 +327,7 @@ QVector<ChatTask::OfflineMessageRecord> ChatTask::loadUnreadOfflineMessages(
 
 bool ChatTask::markOfflineMessageRead(QSqlDatabase &db, qint64 offlineId, const QString &receiver)
 {
+    Q_UNUSED(receiver);
     QSqlQuery query(db);
     query.prepare("UPDATE messages SET is_read = 1 WHERE id = :id AND receiver_id = :receiver");
     query.bindValue(":id", offlineId);
@@ -350,18 +380,14 @@ void ChatTask::fetchOfflineBatchAsync(int offset)
             fetchOfflineBatchAsync(offset + kBatch);
     });
 
-    // 在 Qt 全局线程池中执行 DB 查询，完全不阻塞 WorkerThread 事件循环
     watcher->setFuture(QtConcurrent::run([user, offset]() -> QVector<OfflineMessageRecord> {
-        QString connectionName;
-        QSqlDatabase db = openDatabase(connectionName);
+        QSqlDatabase db = DbConnectionManager::instance().acquire();
         QVector<OfflineMessageRecord> records;
         if (!db.isOpen()) {
-            closeDatabase(db, connectionName);
             return records;
         }
         ensureOfflineMessageSchema(db);
         records = loadUnreadOfflineMessages(db, user, offset, kBatch);
-        closeDatabase(db, connectionName);
         return records;
     }));
 }
@@ -371,6 +397,35 @@ void ChatTask::deliverOfflineMessage(qint64 offlineId, const QString &sender, co
     if (!m_socket || m_socket->state() != QAbstractSocket::ConnectedState) {
         return;
     }
+    
+    // 尝试解析为 JSON 格式的文件信息
+    QJsonParseError jsonErr;
+    const QJsonDocument doc = QJsonDocument::fromJson(content.toUtf8(), &jsonErr);
+    
+    // 如果是文件类型消息，从本地磁盘读取并发送
+    if (jsonErr.error == QJsonParseError::NoError && doc.isObject()) {
+        const QJsonObject obj = doc.object();
+        const QString type = obj.value(QStringLiteral("type")).toString();
+        
+        if (type == QStringLiteral("file")) {
+            const QString filePath = obj.value(QStringLiteral("filePath")).toString();
+            const QString fileName = obj.value(QStringLiteral("fileName")).toString();
+            const qint64 fileSize = obj.value(QStringLiteral("fileSize")).toVariant().toLongLong();
+            
+            // 验证文件存在
+            QFile file(filePath);
+            if (!file.exists()) {
+                qWarning() << "离线文件不存在，跳过发送" << filePath;
+                return;
+            }
+            
+            // 使用文件传输协议发送文件（false = 不删除离线存储的文件）
+            deliverFile(sender, username, fileName, fileSize, filePath, false);
+            return;
+        }
+    }
+    
+    // 普通文本消息处理
     const QByteArray encoded = content.toUtf8().toBase64();
     const QString packet = QStringLiteral("OFFLINE::%1::%2::%3::%4\n")
                                .arg(offlineId)
@@ -398,8 +453,16 @@ void ChatTask::resetIncomingFileState(bool removeTempFile) {
 
 void ChatTask::resetOutgoingFileState(bool removeTemp) {
     if (m_outFile.isOpen()) m_outFile.close();
-    if (removeTemp && !m_outFilePath.isEmpty()) QFile::remove(m_outFilePath);
-    m_outFilePath.clear(); m_outFileSize = 0; m_outFileSent = 0;
+    if (removeTemp && m_outFileShouldDelete && !m_outFilePath.isEmpty()) QFile::remove(m_outFilePath);
+    m_outFilePath.clear();
+    m_outFileName.clear();
+    m_outSender.clear();
+    m_outReceiver.clear();
+    m_outFileSize = 0;
+    m_outFileSent = 0;
+    m_outHeaderBytesRemaining = 0;
+    m_outTransferStarted = false;
+    m_outFileShouldDelete = true;  // 重置标志
     m_outFile.setFileName(QString());
 }
 
@@ -414,35 +477,107 @@ void ChatTask::handleSendFile(const QString &sender, const QString &receiver,
 
 void ChatTask::persistOfflineMessageAsync(const QString &sender, const QString &receiver, const QString &message) {
     QtConcurrent::run([sender, receiver, message]() {
-        QString connectionName;
-        QSqlDatabase db = openDatabase(connectionName);
-        if (!db.isOpen()) { closeDatabase(db, connectionName); return; }
+        QSqlDatabase db = DbConnectionManager::instance().acquire();
+        if (!db.isOpen()) { return; }
         ensureOfflineMessageSchema(db);
         QSqlQuery query(db);
         query.prepare("INSERT INTO messages(sender_id,receiver_id,message_text,send_time,is_read) VALUES(:username,:friendname,:content,:send_time,0)");
         query.bindValue(":username", sender); query.bindValue(":friendname", receiver);
         query.bindValue(":content", message); query.bindValue(":send_time", QDateTime::currentDateTime());
         if (!query.exec()) qWarning() << "离线消息写入失败" << query.lastError().text();
-        closeDatabase(db, connectionName);
     });
+}
+
+QString ChatTask::buildOfflineFileStoragePath(const QString &receiver, const QString &fileName) {
+    // 获取文件存储根目录（可配置，默认为 app_data/offline_files）
+    const QString storageRoot = qEnvironmentVariable("EASYCHAT_FILE_STORAGE_PATH", 
+                                                      QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/offline_files");
+    
+    // 为每个收件人创建专属目录，避免文件名冲突
+    const QString receiverPath = storageRoot + "/" + receiver;
+    QDir dir(receiverPath);
+    if (!dir.exists()) {
+        if (!QDir().mkpath(receiverPath)) {
+            qWarning() << "无法创建文件存储目录" << receiverPath;
+            return QString();
+        }
+    }
+    
+    // 生成唯一的目标文件路径（时间戳+原文件名）
+    const QString timestamp = QString::number(QDateTime::currentMSecsSinceEpoch());
+    const QFileInfo fileInfo(fileName);
+    const QString uniqueFileName = timestamp + "_" + fileInfo.fileName();
+    
+    return receiverPath + "/" + uniqueFileName;
 }
 
 void ChatTask::persistOfflineFileAsync(const QString &sender, const QString &receiver, const QString &filePath) {
     QtConcurrent::run([sender, receiver, filePath]() {
-        QFile file(filePath);
-        if (!file.open(QIODevice::ReadOnly)) { QFile::remove(filePath); return; }
-        const QByteArray fileData = file.readAll();
-        file.close();
-        QString connectionName;
-        QSqlDatabase db = openDatabase(connectionName);
-        if (!db.isOpen()) { closeDatabase(db, connectionName); QFile::remove(filePath); return; }
-        ensureOfflineMessageSchema(db);
-        QSqlQuery query(db);
-        query.prepare("INSERT INTO messages(sender_id,receiver_id,message_text,send_time,is_read) VALUES(:username,:friendname,:content,:send_time,0)");
-        query.bindValue(":username", sender); query.bindValue(":friendname", receiver);
-        query.bindValue(":content", fileData.toBase64()); query.bindValue(":send_time", QDateTime::currentDateTime());
-        if (!query.exec()) qWarning() << "离线文件写入失败" << query.lastError().text();
-        closeDatabase(db, connectionName);
+        QFile sourceFile(filePath);
+        if (!sourceFile.exists()) {
+            qWarning() << "源文件不存在" << filePath;
+            return;
+        }
+        
+        if (!sourceFile.open(QIODevice::ReadOnly)) {
+            qWarning() << "无法打开源文件" << filePath;
+            QFile::remove(filePath);
+            return;
+        }
+        
+        // 获取文件名用于生成存储路径
+        const QString fileName = QFileInfo(filePath).fileName();
+        sourceFile.close();
+        
+        // 生成存储路径
+        const QString storagePath = ChatTask::buildOfflineFileStoragePath(receiver, fileName);
+        if (storagePath.isEmpty()) {
+            qWarning() << "生成存储路径失败";
+            QFile::remove(filePath);
+            return;
+        }
+        
+        // 将临时文件复制到存储目录
+        if (!QFile::copy(filePath, storagePath)) {
+            qWarning() << "无法复制文件到存储目录" << filePath << "->" << storagePath;
+            QFile::remove(filePath);
+            return;
+        }
+        
+        // 删除临时文件
         QFile::remove(filePath);
+        
+        // 连接数据库并保存文件路径（而不是文件内容）
+        QSqlDatabase db = DbConnectionManager::instance().acquire();
+        if (!db.isOpen()) {
+            qWarning() << "数据库连接失败，删除已保存文件" << storagePath;
+            QFile::remove(storagePath);
+            return;
+        }
+        
+        ensureOfflineMessageSchema(db);
+        
+        // 构建文件信息 JSON（存储文件类型标记、文件名和路径）
+        QJsonObject fileInfo;
+        fileInfo["type"] = "file";
+        fileInfo["fileName"] = fileName;
+        fileInfo["filePath"] = storagePath;
+        fileInfo["fileSize"] = QFileInfo(storagePath).size();
+        const QString fileInfoJson = QJsonDocument(fileInfo).toJson(QJsonDocument::Compact);
+        
+        QSqlQuery query(db);
+        query.prepare("INSERT INTO messages(sender_id,receiver_id,message_text,send_time,is_read) "
+                     "VALUES(:username,:friendname,:content,:send_time,0)");
+        query.bindValue(":username", sender);
+        query.bindValue(":friendname", receiver);
+        query.bindValue(":content", fileInfoJson);
+        query.bindValue(":send_time", QDateTime::currentDateTime());
+        
+        if (!query.exec()) {
+            qWarning() << "离线文件记录写入失败" << query.lastError().text();
+            // 写入数据库失败，删除已保存的文件
+            QFile::remove(storagePath);
+        }
+        
     });
 }

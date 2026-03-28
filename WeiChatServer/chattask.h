@@ -10,6 +10,9 @@
 #include<QDir>
 #include<QVector>
 #include<QFutureWatcher>
+#include<QStandardPaths>
+#include<QJsonDocument>
+#include<QJsonObject>
 
 class ChatServer;
 
@@ -23,7 +26,7 @@ public slots:
     void start();
     void deliverMessage(const QString &sender, const QString &message);
     void deliverFile(const QString &sender, const QString &receiver,
-                     const QString &fileName, qint64 fileSize, const QString &filePath);
+                     const QString &fileName, qint64 fileSize, const QString &filePath, bool deleteAfter = true);
 
 private slots:
     void onReadyRead();
@@ -45,8 +48,6 @@ private:
     void writeNextFileChunk();
 
     static QString generateUniqueConnectionName();
-    static QSqlDatabase openDatabase(QString &connectionName);
-    static void closeDatabase(QSqlDatabase &db, const QString &connectionName);
     static bool ensureOfflineMessageSchema(QSqlDatabase &db);
     static bool updateUserOnlineStatus(const QString &username, int status);
     static QVector<OfflineMessageRecord> loadUnreadOfflineMessages(QSqlDatabase &db, const QString &receiver,
@@ -57,6 +58,7 @@ private:
     void fetchOfflineBatchAsync(int offset);
     void deliverOfflineMessage(qint64 offlineId, const QString &sender, const QString &content, const QString &sendTimeText);
     QString buildTempFilePath(const QString &incomingFileName) const;
+    static QString buildOfflineFileStoragePath(const QString &receiver, const QString &fileName);
     void resetIncomingFileState(bool removeTempFile);
     void resetOutgoingFileState(bool removeTemp);
 
@@ -88,8 +90,14 @@ private:
     // 发送状态
     QFile m_outFile;
     QString m_outFilePath;
+    QString m_outFileName;
+    QString m_outSender;
+    QString m_outReceiver;
     qint64 m_outFileSize = 0;
     qint64 m_outFileSent = 0;
+    qint64 m_outHeaderBytesRemaining = 0;
+    bool m_outTransferStarted = false;
+    bool m_outFileShouldDelete = true;  // 发送完是否删除文件（临时文件删除，离线文件保留）
     static constexpr qint64 OUT_CHUNK = 65536;
 
 signals:

@@ -1,22 +1,25 @@
 #include<QTcpServer>
 #include<QTcpSocket>
 #include<QHostAddress>
-#include<QCoreApplication>
-#include<QDateTime>
 #include<QSqlDatabase>
 #include<QSqlError>
 #include<QSqlQuery>
 #include<QStringList>
-#include<QUuid>
+#include "dbconnectionmanager.h"
 
 class FriendServer : public QTcpServer{
     Q_OBJECT
 public:
     explicit FriendServer(QObject* parent = nullptr) : QTcpServer(parent){
         if (this->listen(QHostAddress::AnyIPv6, 7000)) {
-            qDebug() << "IPv6 friend server started on port 7000" << serverAddress().toString();
+            qDebug() << "FriendServer started on" << serverAddress().toString() << "port 7000 (IPv6)";
         } else {
-            qDebug() << "Failed to start IPv6 friend server!";
+            qWarning() << "FriendServer IPv6 listen failed:" << errorString() << "falling back to IPv4";
+            if (this->listen(QHostAddress::Any, 7000)) {
+                qDebug() << "FriendServer started on" << serverAddress().toString() << "port 7000 (IPv4 fallback)";
+            } else {
+                qWarning() << "FriendServer failed to start on both IPv6 and IPv4:" << errorString();
+            }
         }
     };
     ~FriendServer() = default;
@@ -40,36 +43,9 @@ protected:
         connect(socket, &QTcpSocket::disconnected, socket, &QTcpSocket::deleteLater);
     }
 private:
-    static QString generateUniqueConnectionName() {
-        const QString processId = QString::number(QCoreApplication::applicationPid());
-        const QString timestamp = QString::number(QDateTime::currentMSecsSinceEpoch());
-        const QString uuid = QUuid::createUuid().toString();
-        return QString("%1_%2_%3").arg(processId).arg(timestamp).arg(uuid);
-    }
-
-    static QSqlDatabase openDatabase(QString &connectionName) {
-        connectionName = generateUniqueConnectionName();
-        QSqlDatabase db = QSqlDatabase::addDatabase("QODBC", connectionName);
-        db.setDatabaseName("Driver={SQL Server};Server=(local);Database=ChatApp;Trusted_Connection=yes;");
-        if (!db.open()) {
-            qWarning() << "Database connection failed:" << db.lastError().text();
-        }
-        return db;
-    }
-
-    static void closeDatabase(QSqlDatabase &db, const QString &connectionName) {
-        if (db.isOpen()) {
-            db.close();
-        }
-        db = QSqlDatabase();
-        QSqlDatabase::removeDatabase(connectionName);
-    }
-
     static QString processRequest(const QString &message) {
-        QString connectionName;
-        QSqlDatabase db = openDatabase(connectionName);
+        QSqlDatabase db = DbConnectionManager::instance().acquire();
         if (!db.isOpen()) {
-            closeDatabase(db, connectionName);
             return QString();
         }
 
@@ -95,7 +71,6 @@ private:
             }
         }
 
-        closeDatabase(db, connectionName);
         return response;
     }
 
@@ -159,21 +134,22 @@ private:
 
         QSqlQuery queryONLINE(db);
         QStringList friendIds;
+        auto readOnline = [&queryONLINE](const QString &name) -> QString {
+            queryONLINE.prepare("SELECT is_online FROM client WHERE username=:username");
+            queryONLINE.bindValue(":username", name);
+            if (queryONLINE.exec() && queryONLINE.next()) {
+                return queryONLINE.value(0).toString();
+            }
+            return QStringLiteral("0");
+        };
+
         if (query.exec()) {
             while (query.next()) {
                 if (query.value(0).toString() != username) {
-                    queryONLINE.prepare("SELECT is_online FROM client WHERE username=:username");
-                    queryONLINE.bindValue(":username", query.value(0).toString());
-                    if (queryONLINE.exec() && queryONLINE.next()) {
-                        friendIds.append(query.value(0).toString() + "+" + queryONLINE.value(0).toString());
-                    }
+                    friendIds.append(query.value(0).toString() + "+" + readOnline(query.value(0).toString()));
                 }
                 if (query.value(1).toString() != username) {
-                    queryONLINE.prepare("SELECT is_online FROM client WHERE username=:username");
-                    queryONLINE.bindValue(":username", query.value(1).toString());
-                    if (queryONLINE.exec() && queryONLINE.next()) {
-                        friendIds.append(query.value(1).toString() + "+" + queryONLINE.value(0).toString());
-                    }
+                    friendIds.append(query.value(1).toString() + "+" + readOnline(query.value(1).toString()));
                 }
             }
         }

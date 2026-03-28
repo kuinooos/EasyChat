@@ -57,6 +57,7 @@ private:
     QAction *m_searchAction = nullptr;
     QAction *m_clearAction = nullptr;
     QTimer *m_friendRefreshTimer = nullptr;
+    QTimer *m_heartbeatTimer = nullptr;
     QHash<QString, QString> m_peerAvatar;
     QHash<QString, ChatMessageListModel *> m_conversationModels;
     QHash<QString, QString> m_draftCache;
@@ -101,6 +102,7 @@ private:
     void updateActionIcons();
     void updateDecorativeIcons();
     void sendOfflineAck(qint64 offlineId);
+    void sendHeartbeat();
 
     // 发送文件状态
     QFile m_sendFile;
@@ -124,6 +126,14 @@ private:
     qint64 m_currentRecvMessageId = -1;
     qint64 m_currentSendMessageId = -1;
     QString m_currentSendPeer;
+
+    struct PendingIncomingFile {
+        QString sender;
+        QString receiver;
+        QString fileName;
+        qint64 fileSize = 0;
+    };
+    QHash<qint64, PendingIncomingFile> m_pendingIncomingFiles;
 
     void processPendingData();
     bool consumeFileBytes();

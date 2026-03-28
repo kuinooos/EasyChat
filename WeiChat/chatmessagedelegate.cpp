@@ -162,7 +162,7 @@ void ChatMessageDelegate::paint(QPainter *painter, const QStyleOptionViewItem &o
         const int fileTitleWidth = qMin(maxBubbleWidth, qMax(180, titleFm.horizontalAdvance(fileName) + 24));
         bubbleWidth = qMin(maxBubbleWidth + 24, fileTitleWidth + 24);
         const int progressHeight = 10;
-        const int buttonHeight = (fileCompleted && downloadable) ? 28 : 0;
+        const int buttonHeight = downloadable ? 28 : 0;
         contentHeight = titleFm.height() + 8 + textFm.height() + 12 + progressHeight + 8 + buttonHeight;
     } else {
         textBound = textFm.boundingRect(QRect(0, 0, maxBubbleWidth, 10000), Qt::TextWordWrap | Qt::AlignLeft, text);
@@ -260,14 +260,14 @@ void ChatMessageDelegate::paint(QPainter *painter, const QStyleOptionViewItem &o
         }
         top += 16;
 
-        if (fileCompleted && downloadable) {
+        if (downloadable) {
             const QRect btnRect = fileDownloadButtonRect(bubbleRect);
             painter->setBrush(light ? QColor(31, 36, 44) : QColor(236, 240, 245));
             painter->setPen(Qt::NoPen);
             painter->drawRoundedRect(btnRect, 8, 8);
             painter->setFont(QFont(QStringLiteral("Microsoft YaHei UI"), 9, QFont::DemiBold));
             painter->setPen(light ? QColor(248, 250, 252) : QColor(23, 27, 32));
-            painter->drawText(btnRect, Qt::AlignCenter, QStringLiteral("下载"));
+            painter->drawText(btnRect, Qt::AlignCenter, fileCompleted ? QStringLiteral("另存为") : QStringLiteral("下载"));
         }
     } else {
         painter->setFont(textFont);
@@ -314,7 +314,7 @@ QSize ChatMessageDelegate::sizeHint(const QStyleOptionViewItem &option,
         contentHeight = imageHeight + (fileName.isEmpty() ? 0 : textFm.height() + 8);
     } else if (type == static_cast<int>(ChatMessageListModel::MessageItem::File)) {
         contentHeight = titleFm.height() + textFm.height() + 34;
-        if (fileCompleted && downloadable) {
+        if (downloadable) {
             contentHeight += 30;
         }
     } else {
@@ -368,7 +368,7 @@ bool ChatMessageDelegate::editorEvent(QEvent *event, QAbstractItemModel *model,
         return QStyledItemDelegate::editorEvent(event, model, option, index);
     }
 
-    if (!downloadable || !completed) {
+    if (!downloadable) {
         return QStyledItemDelegate::editorEvent(event, model, option, index);
     }
 
@@ -383,7 +383,8 @@ bool ChatMessageDelegate::editorEvent(QEvent *event, QAbstractItemModel *model,
     const int senderHeight = (system || sender.isEmpty()) ? 0 : senderFm.height() + 4;
     const int fileTitleWidth = qMin(maxBubbleWidth, qMax(180, titleFm.horizontalAdvance(fileName) + 24));
     const int bubbleWidth = qMin(maxBubbleWidth + 24, fileTitleWidth + 24);
-    const int bubbleHeight = senderHeight + titleFm.height() + senderFm.height() + 64;
+    const int progressAndButtonHeight = downloadable ? 64 : 36;
+    const int bubbleHeight = senderHeight + titleFm.height() + senderFm.height() + progressAndButtonHeight;
     const QDateTime ts = index.data(ChatMessageListModel::TimestampRole).toDateTime();
     const bool showTimestamp = shouldShowTimestamp(index, ts);
     const QRect bubbleRect = bubbleRectForRow(option, outgoing, system, bubbleWidth, bubbleHeight, showTimestamp);

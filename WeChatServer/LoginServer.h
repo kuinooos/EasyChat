@@ -17,9 +17,14 @@ public:
         QHostAddress hostaddr(read_ip_address());
         Q_UNUSED(hostaddr);
         if (listen(QHostAddress::AnyIPv6, 55555)) {
-            qDebug() << "IPv6 login server started on port 55555" << serverAddress().toString();
+            qDebug() << "LoginServer started on" << serverAddress().toString() << "port 55555 (IPv6)";
         } else {
-            qDebug() << "Failed to start IPv6 login server!";
+            qWarning() << "LoginServer IPv6 listen failed:" << errorString() << "falling back to IPv4";
+            if (listen(QHostAddress::Any, 55555)) {
+                qDebug() << "LoginServer started on" << serverAddress().toString() << "port 55555 (IPv4 fallback)";
+            } else {
+                qWarning() << "LoginServer failed to start on both IPv6 and IPv4:" << errorString();
+            }
         }
     }
 
